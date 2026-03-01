@@ -1,0 +1,122 @@
+{
+  "projectType": "infrastructure",
+  "projectName": "stereOS",
+  "projectDescription": "A hardened, minimal Linux operating system purpose-built for running AI agents in isolated environments.",
+  "theme": "aspen",
+  "primaryColor": "#8B5CF6",
+  "lightColor": "#C4B5FD",
+  "darkColor": "#6D28D9",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/architecture",
+              "concepts/mixtapes",
+              "concepts/security",
+              "concepts/system-components"
+            ]
+          },
+          {
+            "group": "Mixtapes",
+            "pages": [
+              "mixtapes/overview",
+              "mixtapes/opencode",
+              "mixtapes/claude-code",
+              "mixtapes/gemini-cli",
+              "mixtapes/full",
+              "mixtapes/creating-custom"
+            ]
+          },
+          {
+            "group": "Image Formats",
+            "pages": [
+              "formats/overview",
+              "formats/raw-efi",
+              "formats/qcow2",
+              "formats/kernel-artifacts",
+              "formats/distribution"
+            ]
+          },
+          {
+            "group": "Development",
+            "pages": [
+              "development/building",
+              "development/running-vms",
+              "development/configuration",
+              "development/contributing"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "NixOS Modules",
+            "pages": [
+              "api/modules/overview",
+              "api/modules/base",
+              "api/modules/boot",
+              "api/modules/users",
+              "api/modules/services"
+            ]
+          },
+          {
+            "group": "Options",
+            "pages": [
+              "api/options/stereos-ssh",
+              "api/options/stereos-agent"
+            ]
+          },
+          {
+            "group": "Library Functions",
+            "pages": [
+              "api/lib/mk-mixtape",
+              "api/lib/mk-sandbox-manifest",
+              "api/lib/mk-dist"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Hardened Linux OS optimized for AI agent execution",
+    "Pre-configured mixtapes with popular AI coding agents (OpenCode, Claude Code, Gemini CLI)",
+    "Multi-format image builds (Raw EFI, QCOW2, kernel artifacts)",
+    "Isolated agent environment with restricted shell and package access",
+    "Dual-daemon architecture (stereosd system daemon, agentd agent manager)",
+    "gVisor sandbox support for enhanced security isolation",
+    "NixOS-based declarative configuration with flake support",
+    "Sub-3-second boot time optimization"
+  ],
+  "publicApiSurface": [
+    "stereos.ssh.authorizedKeys",
+    "stereos.agent.extraPackages",
+    "stereos.agent.basePackages",
+    "mkMixtape",
+    "mkSandboxManifest",
+    "mkDist",
+    "nixosModules.default",
+    "nixosConfigurations.opencode-mixtape",
+    "nixosConfigurations.claude-code-mixtape",
+    "nixosConfigurations.gemini-cli-mixtape",
+    "nixosConfigurations.full-mixtape",
+    "packages.<system>.<mixtape-name>",
+    "packages.<system>.<mixtape-name>-qcow2",
+    "packages.<system>.<mixtape-name>-kernel-artifacts",
+    "packages.<system>.<mixtape-name>-dist"
+  ]
+}
