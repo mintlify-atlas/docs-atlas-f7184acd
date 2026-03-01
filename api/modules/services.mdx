@@ -1,0 +1,163 @@
+---
+title: "Service Modules"
+description: "stereosd and agentd service definitions"
+---
+
+stereOS includes two core system services:
+
+- **stereosd** - VM lifecycle control plane (vsock, shared directories, secrets)
+- **agentd** - Agent process manager (tmux and gVisor sandboxes)
+
+## stereosd Service
+
+Defined in `modules/services/stereosd.nix`.
+
+The base service definition comes from the external stereosd flake. This module enables the service and adds stereOS-specific configuration.
+
+### Service Configuration
+
+```nix
+services.stereosd.enable = true;
+```
+
+### Runtime Directories
+
+tmpfiles rules create runtime directories:
+
+```nix
+systemd.tmpfiles.rules = [
+  "d /run/stereos 0750 root admin -"
+  "d /run/stereos/secrets 0700 root root -"
+];
+```
+
+- `/run/stereos` - Unix socket for stereosd/agentd communication (admin group can access)
+- `/run/stereos/secrets` - Root-only secret injection directory
+
+### Firewall
+
+TCP port 1024 is opened for control plane TCP fallback:
+
+```nix
+networking.firewall.allowedTCPPorts = [ 1024 ];
+```
+
+When AF_VSOCK is unavailable (macOS/HVF + QEMU user-mode networking), stereosd listens on TCP and the host reaches it via SLIRP port forwarding.
+
+### Service Overrides
+
+```nix
+systemd.services.stereosd = {
+  # mount and umount for shared directory mounting
+  path = [ pkgs.util-linux pkgs.coreutils ];
+  
+  # Wait for kernel modules to load
+  after = [ "systemd-modules-load.service" ];
+  
+  serviceConfig = {
+    # Run as root (not DynamicUser) because stereosd needs to:
+    # - Bind to AF_VSOCK sockets
+    # - Mount/unmount shared filesystems (CAP_SYS_ADMIN)
+    # - Write secrets to /run/stereos/secrets
+    # - Initiate system poweroff
+    DynamicUser = lib.mkForce false;
+    
+    Restart = lib.mkForce "on-failure";
+    RestartSec = 5;
+  };
+};
+```
+
+### What stereosd Provides
+
+- Lifecycle signaling over virtio-vsock (CID:3, port 1024)
+- Shared directory mounting (virtio-fs / 9p)
+- Secret injection to tmpfs-backed paths
+- Graceful shutdown coordination
+- Unix socket at `/run/stereos/stereosd.sock`
+
+## agentd Service
+
+Defined in `modules/services/agentd.nix`.
+
+The base service definition comes from the external agentd flake. This module enables the service and adds stereOS-specific configuration.
+
+### Service Configuration
+
+```nix
+services.agentd.enable = true;
+```
+
+### Runtime Directories
+
+```nix
+systemd.tmpfiles.rules = [
+  "d /run/agentd 0750 agent admin -"
+  "d /run/agentd/sandboxes 0750 root admin -"
+  "d /run/agentd/runsc-state 0750 root admin -"
+];
+```
+
+- `/run/agentd` - tmux socket for native agents
+- `/run/agentd/sandboxes` - OCI bundles for gVisor sandboxes
+- `/run/agentd/runsc-state` - runsc container state
+
+### Service Ordering
+
+agentd depends on stereosd:
+
+```nix
+systemd.services.agentd = {
+  after = [ "stereosd.service" ];
+  requires = [ "stereosd.service" ];
+  
+  # Add gVisor (runsc) and nix-store to PATH
+  path = [ pkgs.gvisor pkgs.nix ];
+  
+  serviceConfig = {
+    # Run as root (not DynamicUser) so it can:
+    # - Manage tmux sessions for the agent user (native mode)
+    # - Manage runsc containers (sandboxed mode)
+    DynamicUser = lib.mkForce false;
+    
+    Restart = lib.mkForce "on-failure";
+    RestartSec = 5;
+  };
+};
+```
+
+### Agent Modes
+
+agentd supports two execution modes:
+
+#### Native Mode
+
+Agent runs in a tmux session as the `agent` user. Admin can introspect via:
+
+```bash
+sudo tmux -S /run/agentd/agentd-tmux.sock attach
+```
+
+#### Sandboxed Mode
+
+Agent runs in a gVisor sandbox (runsc container). Admin can introspect via:
+
+```bash
+sudo runsc --root=/run/agentd/runsc-state exec <container-id> sh
+```
+
+## Service Dependencies
+
+```
+stereosd.service
+    |
+    +-- required by --> agentd.service
+                            |
+                            +-- started by --> stereos-ready.service
+```
+
+## Source Reference
+
+View the module sources:
+- stereosd: `modules/services/stereosd.nix:1`
+- agentd: `modules/services/agentd.nix:1`

@@ -1,0 +1,553 @@
+---
+title: Contributing Guide
+description: How to contribute to stereOS development
+---
+
+Welcome to stereOS development! This guide will help you contribute effectively to the project.
+
+## Getting Started
+
+<Steps>
+  <Step title="Fork and clone the repository">
+    ```bash
+    git clone https://github.com/yourusername/stereos.git
+    cd stereos
+    ```
+  </Step>
+  
+  <Step title="Set up GitHub authentication">
+    stereOS requires access to private GitHub repositories for flake inputs.
+    
+    Add to your shell RC file (`~/.bashrc`, `~/.zshrc`, etc.):
+    
+    ```bash
+    if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
+      export NIX_CONFIG="access-tokens = github.com=$(gh auth token)"
+    fi
+    ```
+    
+    Then authenticate:
+    
+    ```bash
+    gh auth login
+    ```
+  </Step>
+  
+  <Step title="Enter the development shell">
+    ```bash
+    nix develop --impure
+    ```
+    
+    Or use direnv for automatic activation:
+    
+    ```bash
+    direnv allow
+    ```
+  </Step>
+  
+  <Step title="Verify the setup">
+    ```bash
+    make help
+    ```
+    
+    You should see the stereOS development targets.
+  </Step>
+</Steps>
+
+## Development Workflow
+
+### Make Changes
+
+stereOS uses a modular architecture. Common files to edit:
+
+- `modules/` - Core NixOS modules (base system, boot, services, users)
+- `profiles/` - Composable configuration presets
+- `mixtapes/` - Agent-specific configurations
+- `formats/` - Image format definitions
+- `flake/` - Build system and development tools
+
+### Build and Test
+
+<Steps>
+  <Step title="Build your changes">
+    ```bash
+    make build-qcow2
+    ```
+    
+    Or for a specific mixtape:
+    
+    ```bash
+    MIXTAPE=opencode-mixtape-dev make build-qcow2
+    ```
+  </Step>
+  
+  <Step title="Test in a VM">
+    ```bash
+    make run
+    ```
+    
+    In another terminal:
+    
+    ```bash
+    make ssh-admin
+    ```
+  </Step>
+  
+  <Step title="Verify your changes">
+    ```bash
+    # Check service status
+    systemctl status stereosd
+    systemctl status agentd
+    
+    # View logs
+    journalctl -u stereosd -f
+    journalctl -u agentd -f
+    
+    # Test agent environment
+    make ssh-agent
+    which opencode
+    echo $PATH
+    ```
+  </Step>
+</Steps>
+
+### Run CI Checks
+
+Before submitting, run the CI verification:
+
+```bash
+make dagger-check
+```
+
+This runs the same checks that will run in GitHub Actions.
+
+## Code Style
+
+### Nix Code
+
+- Use 2-space indentation
+- Follow [NixOS module conventions](https://nixos.org/manual/nixos/stable/#sec-writing-modules)
+- Add comments for complex logic
+- Use `lib.mkOption` for module options with proper descriptions
+
+Example:
+
+```nix
+{ config, lib, pkgs, ... }:
+
+with lib;
+
+{
+  options = {
+    stereos.myOption = mkOption {
+      type = types.str;
+      default = "default-value";
+      description = ''Clear description of what this option does.'';
+    };
+  };
+  
+  config = {
+    # Configuration based on options
+  };
+}
+```
+
+### Go Code (for agentd/stereosd)
+
+stereOS follows idiomatic Go conventions:
+
+- Use Ginkgo/Gomega for testing
+- Follow the `func NewExampleStruct() *ExampleStruct` constructor pattern
+- Run `go fmt` before committing
+- Add tests for new functionality
+
+Example:
+
+```go
+package mypackage
+
+type MyStruct struct {
+    field string
+}
+
+func NewMyStruct(field string) *MyStruct {
+    return &MyStruct{
+        field: field,
+    }
+}
+```
+
+### Commit Messages
+
+Use clear, descriptive commit messages:
+
+```
+modules/base: add support for custom kernel parameters
+
+Adds boot.kernelParams option to base.nix for easier kernel
+configuration. Useful for debugging and performance tuning.
+```
+
+Format:
+- First line: `scope: brief description` (50 chars max)
+- Blank line
+- Detailed explanation (wrap at 72 chars)
+
+## Development Tools
+
+The dev shell provides all necessary tools:
+
+### Make Targets
+
+```bash
+make help                  # Show all available targets
+make build                 # Build raw image
+make build-qcow2           # Build QCOW2 image
+make build-kernel          # Build kernel artifacts
+make dist                  # Build distribution package
+make run                   # Launch VM
+make ssh-admin             # SSH as admin
+make ssh-agent             # SSH as agent
+make dagger-check          # Run CI checks
+```
+
+### Nix Commands
+
+Direct Nix commands for advanced use:
+
+```bash
+# Build specific configuration
+nix build .#nixosConfigurations.opencode-mixtape.config.system.build.raw --impure
+
+# Enter dev shell
+nix develop --impure
+
+# Update flake inputs
+nix flake update
+
+# Check flake
+nix flake check --impure
+```
+
+### Environment Variables
+
+```bash
+MIXTAPE=opencode-mixtape    # Select mixtape
+ARCH=aarch64-linux          # Target architecture
+SSH_PORT=2222               # SSH port for VM
+```
+
+## Testing
+
+### Manual Testing
+
+<Steps>
+  <Step title="Build test image">
+    ```bash
+    MIXTAPE=opencode-mixtape-dev make build-qcow2
+    ```
+  </Step>
+  
+  <Step title="Launch VM">
+    ```bash
+    make run
+    ```
+  </Step>
+  
+  <Step title="Test functionality">
+    ```bash
+    # Admin access
+    make ssh-admin
+    systemctl status stereosd agentd
+    
+    # Agent access
+    make ssh-agent
+    opencode --help
+    ```
+  </Step>
+</Steps>
+
+### Automated Testing
+
+Run Dagger CI checks locally:
+
+```bash
+make dagger-check
+```
+
+This verifies:
+- All mixtapes build successfully
+- Image formats are valid
+- Kernel artifacts are generated
+- No broken dependencies
+
+## Submitting Changes
+
+<Steps>
+  <Step title="Create a feature branch">
+    ```bash
+    git checkout -b feature/my-feature
+    ```
+  </Step>
+  
+  <Step title="Make commits">
+    ```bash
+    git add .
+    git commit -m "scope: description"
+    ```
+  </Step>
+  
+  <Step title="Run checks">
+    ```bash
+    make dagger-check
+    ```
+  </Step>
+  
+  <Step title="Push to your fork">
+    ```bash
+    git push origin feature/my-feature
+    ```
+  </Step>
+  
+  <Step title="Open a pull request">
+    Go to GitHub and open a pull request from your fork to the main repository.
+    
+    In your PR description:
+    - Explain what changes you made and why
+    - Link any related issues
+    - Describe how you tested the changes
+    - Include screenshots or terminal output if relevant
+  </Step>
+</Steps>
+
+## Pull Request Guidelines
+
+### PR Checklist
+
+Before submitting:
+
+- [ ] Code builds successfully (`make build-qcow2`)
+- [ ] Changes tested in VM (`make run`)
+- [ ] CI checks pass (`make dagger-check`)
+- [ ] Commit messages are clear and descriptive
+- [ ] No sensitive data (API keys, secrets) in commits
+- [ ] Documentation updated if needed
+
+### Review Process
+
+1. Maintainers review your PR
+2. Address any requested changes
+3. Once approved, a maintainer will merge
+
+### After Merge
+
+Your changes will be included in the next stereOS release. Thank you for contributing!
+
+## Common Tasks
+
+### Adding a New Mixtape
+
+<Steps>
+  <Step title="Create mixtape directory">
+    ```bash
+    mkdir -p mixtapes/my-agent
+    ```
+  </Step>
+  
+  <Step title="Create base.nix">
+    ```nix
+    # mixtapes/my-agent/base.nix
+    { pkgs, ... }:
+    {
+      stereos.agent.extraPackages = [
+        pkgs.my-agent
+      ];
+    }
+    ```
+  </Step>
+  
+  <Step title="Register in flake.nix">
+    ```nix
+    # flake.nix
+    {
+      nixosConfigurations = {
+        my-agent-mixtape = stereos-lib.mkMixtape {
+          name = "my-agent-mixtape";
+          features = [ ./mixtapes/my-agent/base.nix ];
+        };
+        
+        my-agent-mixtape-dev = stereos-lib.mkMixtape {
+          name = "my-agent-mixtape";
+          features = [ ./mixtapes/my-agent/base.nix ];
+          extraModules = [ ./profiles/dev.nix ];
+        };
+      };
+    }
+    ```
+  </Step>
+  
+  <Step title="Build and test">
+    ```bash
+    MIXTAPE=my-agent-mixtape-dev make build-qcow2
+    make run
+    make ssh-agent
+    which my-agent
+    ```
+  </Step>
+</Steps>
+
+### Adding a System Package
+
+To add a package available to all users:
+
+```nix
+# modules/base.nix
+{
+  environment.systemPackages = with pkgs; [
+    # ... existing packages ...
+    my-new-package
+  ];
+}
+```
+
+### Modifying Boot Configuration
+
+Edit `modules/boot.nix`:
+
+```nix
+{
+  boot.kernelParams = [
+    "quiet"
+    "my-new-param=value"
+  ];
+}
+```
+
+### Adding a Service
+
+Create a module in `modules/services/`:
+
+```nix
+# modules/services/my-service.nix
+{ config, lib, pkgs, ... }:
+
+{
+  services.my-service = {
+    enable = true;
+    # ... service configuration ...
+  };
+}
+```
+
+Import in `modules/default.nix`:
+
+```nix
+{
+  imports = [
+    # ... existing imports ...
+    ./services/my-service.nix
+  ];
+}
+```
+
+## Troubleshooting Development Issues
+
+### Nix Build Fails
+
+```bash
+# Clear build cache
+nix-collect-garbage -d
+
+# Update flake inputs
+nix flake update
+
+# Rebuild
+make build-qcow2
+```
+
+### GitHub Auth Issues
+
+```bash
+# Check auth status
+gh auth status
+
+# Re-authenticate
+gh auth logout
+gh auth login
+
+# Verify NIX_CONFIG
+echo $NIX_CONFIG
+```
+
+### VM Won't Boot
+
+```bash
+# Try EFI boot instead of direct kernel
+rm -rf result-kernel
+make run
+
+# Or rebuild kernel artifacts
+make build-kernel
+make run
+```
+
+### Can't SSH to VM
+
+```bash
+# Ensure using dev mixtape
+MIXTAPE=opencode-mixtape-dev make build-qcow2
+
+# Check SSH key setup
+ls -la ~/.config/stereos/ssh-key.pub
+
+# Try different port
+SSH_PORT=3333 make run
+SSH_PORT=3333 make ssh-admin
+```
+
+## Resources
+
+### Documentation
+
+- [NixOS Manual](https://nixos.org/manual/nixos/stable/)
+- [Nix Language](https://nixos.org/manual/nix/stable/language/)
+- [Flakes](https://nixos.wiki/wiki/Flakes)
+- [stereOS Architecture](/concepts/architecture)
+
+### Community
+
+- [GitHub Discussions](https://github.com/papercomputeco/stereos/discussions)
+- [Discord](https://discord.gg/T6Y4XkmmV5)
+- [Issues](https://github.com/papercomputeco/stereos/issues)
+
+### Related Projects
+
+- [agentd](https://github.com/papercomputeco/agentd) - Agent management daemon
+- [stereosd](https://github.com/papercomputeco/stereosd) - stereOS system daemon
+- [OpenCode](https://opencode.ai) - AI coding agent
+
+## Getting Help
+
+If you encounter issues:
+
+1. Check existing [GitHub Issues](https://github.com/papercomputeco/stereos/issues)
+2. Search [GitHub Discussions](https://github.com/papercomputeco/stereos/discussions)
+3. Ask in [Discord](https://discord.gg/T6Y4XkmmV5)
+4. Open a new issue with:
+   - Clear description of the problem
+   - Steps to reproduce
+   - Expected vs. actual behavior
+   - System information (OS, Nix version)
+   - Relevant logs or error messages
+
+## Code of Conduct
+
+Be respectful and constructive in all interactions. We're all here to build better tools for AI agents.
+
+## License
+
+By contributing to stereOS, you agree that your contributions will be licensed under the same license as the project.
+
+---
+
+Thank you for contributing to stereOS! Your efforts help make AI agent infrastructure better for everyone.

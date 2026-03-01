@@ -1,0 +1,237 @@
+---
+title: Raw EFI Disk Image
+description: Canonical stereOS disk image format with EFI partition table
+---
+
+The raw EFI disk image is the **canonical stereOS image format**. It produces an uncompressed disk image with a GPT partition table and EFI System Partition (ESP), required for ARM64 virtualization.
+
+## Overview
+
+Defined in `formats/raw-efi.nix`, the raw image format is:
+
+- Used by Apple Virtualization.framework (`VZDiskImageStorageDeviceAttachment`)
+- The base artifact for QCOW2 conversion and OCI distribution
+- Built with NixOS's `make-disk-image.nix` library
+- Automatically sized based on the closure size
+
+## Build Commands
+
+<Tabs>
+  <Tab title="Nix">
+    ```bash
+    nix build .#packages.aarch64-linux.<mixtape-name> --impure
+    ```
+    
+    Result symlink: `result/stereos.img`
+  </Tab>
+  <Tab title="Makefile">
+    ```bash
+    make build MIXTAPE=<mixtape-name>
+    ```
+    
+    Default mixtape: `opencode-mixtape`
+  </Tab>
+</Tabs>
+
+<Note>
+  The `--impure` flag is required because image builds read system information at build time.
+</Note>
+
+## Build Attribute Path
+
+The raw image is exposed via the NixOS configuration's `system.build.raw` attribute:
+
+```nix
+config.system.build.raw
+```
+
+The flake packages map each mixtape to its raw image:
+
+```nix
+packages.aarch64-linux.<mixtape-name> = 
+  nixosConfigurations.<mixtape-name>.config.system.build.raw
+```
+
+## Configuration
+
+From `formats/raw-efi.nix`:
+
+```nix
+system.build.raw = import "${modulesPath}/../lib/make-disk-image.nix" {
+  inherit lib config pkgs;
+
+  name = "stereos-${config.networking.hostName}";
+  baseName = "stereos";
+
+  # Disk sizing: "auto" calculates the minimum size needed for the
+  # closure, then adds additionalSpace on top.
+  diskSize = "auto";
+  additionalSpace = "1024M";  # 1 GB free space for agent work
+
+  # Raw format — uncompressed, required by VZDiskImageStorageDeviceAttachment
+  format = "raw";
+
+  # aarch64 requires EFI partition table (GPT + ESP)
+  partitionTableType = "efi";
+
+  # Don't copy the Nix channel into the image — we use flakes
+  copyChannel = false;
+};
+```
+
+## Disk Layout
+
+The raw image contains:
+
+1. **GPT partition table** (GUID Partition Table)
+2. **ESP** (EFI System Partition, FAT32) - 512MB
+   - systemd-boot bootloader
+   - Kernel images
+   - Boot configuration
+3. **Root partition** (ext4) - Auto-sized
+   - Complete NixOS closure
+   - `/nix/store` with all dependencies
+   - System configuration
+
+## Disk Sizing
+
+The image size is automatically calculated:
+
+```
+total_size = closure_size + 1024MB + esp_size
+```
+
+- **closure_size**: Sum of all files in `/nix/store` and system paths
+- **1024MB**: Free space for agent work (logs, cache, temporary files)
+- **esp_size**: 512MB for the EFI System Partition
+
+Typical sizes:
+- Minimal mixtape: ~2-3 GB
+- OpenCode mixtape: ~4-5 GB
+- Full mixtape (all agents): ~6-8 GB
+
+## Use Cases
+
+### Apple Virtualization.framework
+
+The raw format is required by `VZDiskImageStorageDeviceAttachment`:
+
+```swift
+import Virtualization
+
+let diskImageURL = URL(fileURLWithPath: "result/stereos.img")
+let diskImageAttachment = try VZDiskImageStorageDeviceAttachment(
+    url: diskImageURL,
+    readOnly: false
+)
+
+let storageConfig = VZVirtioBlockDeviceConfiguration(attachment: diskImageAttachment)
+```
+
+### OCI Container Base Layer
+
+The raw image can be imported as a base layer for OCI containers:
+
+```bash
+# Convert to OCI format
+skopeo copy \
+  dir:result/stereos.img \
+  oci:stereos-oci:latest
+```
+
+### QCOW2 Conversion
+
+The QCOW2 format is derived from the raw image:
+
+```bash
+qemu-img convert -f raw -O qcow2 -c \
+  result/stereos.img \
+  stereos.qcow2
+```
+
+See [QCOW2 format](/formats/qcow2) for details.
+
+## Output Files
+
+After building, the result symlink contains:
+
+```
+result/
+└── stereos.img          # Raw disk image (uncompressed)
+```
+
+## Boot Process
+
+The raw image boots via UEFI/GRUB:
+
+1. Firmware (UEFI) initializes and locates the ESP
+2. systemd-boot loads the kernel and initrd from ESP
+3. Kernel decompresses and boots
+4. Initrd mounts the root filesystem
+5. systemd hands off to NixOS stage-2 init
+
+Boot time: 4-6 seconds (typical)
+
+For faster boot, use [kernel artifacts](/formats/kernel-artifacts) with direct kernel boot.
+
+## File Naming
+
+The output filename is derived from the hostname:
+
+```nix
+imageName = "stereos-${config.networking.hostName}";
+```
+
+However, the actual file in the result directory is always named `stereos.img`.
+
+## Compression
+
+The raw image is **uncompressed** by design. For compressed distribution, use:
+
+- **Manual compression**: `zstd -19 -T0 result/stereos.img`
+- **Distribution bundle**: `make dist` includes `stereos.img.zst`
+
+See [Distribution format](/formats/distribution) for details.
+
+## Related Formats
+
+<CardGroup cols={2}>
+  <Card title="QCOW2" icon="box" href="/formats/qcow2">
+    Compressed format derived from raw image
+  </Card>
+  <Card title="Distribution" icon="package" href="/formats/distribution">
+    Complete bundle with all formats and checksums
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+### Build fails with "No space left on device"
+
+The Nix build sandbox may run out of space. Increase the sandbox size:
+
+```bash
+# In /etc/nix/nix.conf or ~/.config/nix/nix.conf
+sandbox-fallback = false
+extra-sandbox-paths = /tmp
+```
+
+### Image is larger than expected
+
+Check the closure size:
+
+```bash
+nix path-info -rS .#packages.aarch64-linux.<mixtape-name> | tail -1
+```
+
+The total size is closure size + 1GB + 512MB (ESP).
+
+### "impure" flag required
+
+The raw image build reads system information (hostname, etc.) at build time, making it impure:
+
+```bash
+nix build .#packages.aarch64-linux.<mixtape-name> --impure
+```
+
+This is intentional and required for all image builds.

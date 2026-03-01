@@ -1,0 +1,609 @@
+---
+title: Configuration Options
+description: Customize stereOS with NixOS modules, profiles, and mixtapes
+---
+
+stereOS is highly configurable using NixOS modules. The system provides custom options for SSH keys and agent packages, plus full access to standard NixOS configuration.
+
+## Architecture Overview
+
+stereOS configuration is organized into composable layers:
+
+```
+flake.nix                       # Entry point (thin, delegates to flake/)
+├── flake/                      # flake-parts modules
+│   ├── devshell.nix            # Development tools
+│   ├── images.nix              # Image build targets
+│   └── checks.nix              # CI verification
+│
+├── modules/                    # Core NixOS modules
+│   ├── base.nix                # System foundation
+│   ├── boot.nix                # Boot configuration
+│   ├── services/               # Service overrides
+│   └── users/                  # User configuration
+│
+├── profiles/                   # Composable presets
+│   ├── base.nix                # Shared foundation
+│   └── dev.nix                 # Development-only
+│
+└── mixtapes/                   # Agent configurations
+    ├── opencode/base.nix       # OpenCode agent
+    ├── claude-code/base.nix    # Claude Code agent
+    └── full/base.nix           # All agents
+```
+
+## stereOS Custom Options
+
+stereOS declares two custom NixOS options for system configuration.
+
+### stereos.ssh.authorizedKeys
+
+**Type:** `listOf str`  
+**Default:** `[]`
+
+SSH public keys for both `admin` and `agent` users.
+
+```nix
+{
+  stereos.ssh.authorizedKeys = [
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKey user@host"
+  ];
+}
+```
+
+<Warning>
+  Only use this option for **development builds**. Production builds should inject keys ephemerally via stereosd/vsock.
+</Warning>
+
+### stereos.agent.extraPackages
+
+**Type:** `listOf package`  
+**Default:** `[]`
+
+Packages added to the agent user's restricted `PATH`.
+
+```nix
+{ pkgs, ... }:
+{
+  stereos.agent.extraPackages = [
+    pkgs.opencode
+    pkgs.git
+    pkgs.vim
+  ];
+}
+```
+
+This is the primary mechanism for adding agent binaries to mixtapes. See [Creating Mixtapes](#creating-mixtapes) below.
+
+## Creating Mixtapes
+
+Mixtapes are stereOS configurations that bundle specific AI agents with the base system.
+
+### Basic Mixtape
+
+Create a feature module in `mixtapes/my-agent/base.nix`:
+
+```nix
+# mixtapes/my-agent/base.nix
+{ pkgs, ... }:
+{
+  # Add your agent to the agent user's PATH
+  stereos.agent.extraPackages = [
+    pkgs.my-agent
+  ];
+  
+  # Optional: Agent-specific system configuration
+  environment.variables.MY_AGENT_CONFIG = "/etc/my-agent/config.toml";
+}
+```
+
+### Register Mixtape
+
+Add to `flake.nix`:
+
+```nix
+{
+  flake = {
+    nixosConfigurations = {
+      # Production configuration
+      my-agent-mixtape = stereos-lib.mkMixtape {
+        name = "my-agent-mixtape";
+        features = [ ./mixtapes/my-agent/base.nix ];
+      };
+      
+      # Development configuration (SSH keys baked in)
+      my-agent-mixtape-dev = stereos-lib.mkMixtape {
+        name = "my-agent-mixtape";
+        features = [ ./mixtapes/my-agent/base.nix ];
+        extraModules = [ ./profiles/dev.nix ];
+      };
+    };
+  };
+}
+```
+
+### Build Mixtape
+
+<CodeGroup>
+```bash Production
+nix build .#nixosConfigurations.my-agent-mixtape.config.system.build.qcow2 --impure
+```
+
+```bash Development
+MIXTAPE=my-agent-mixtape-dev make build-qcow2
+```
+</CodeGroup>
+
+## mkMixtape Helper
+
+The `lib/default.nix:mkMixtape` function assembles complete NixOS configurations.
+
+### Function Signature
+
+```nix
+mkMixtape {
+  name          # String: Hostname for the mixtape
+  features      # List: Mixtape-specific modules
+  system        # String: Target architecture (default: "aarch64-linux")
+  extraModules  # List: Additional modules (e.g., profiles/dev.nix)
+}
+```
+
+### What mkMixtape Includes
+
+`mkMixtape` automatically includes:
+
+1. **External flake modules** - `agentd` and `stereosd` NixOS modules + overlays
+2. **stereOS module tree** - All modules from `modules/`
+3. **Base profile** - `profiles/base.nix` (shared foundation)
+4. **Sandbox manifest** - Pre-computed Nix store closure for gVisor sandboxes
+5. **Feature modules** - Your mixtape-specific configuration
+6. **Extra modules** - Optional additions (e.g., dev.nix)
+
+### Sandbox Manifest
+
+Every mixtape includes a pre-computed Nix store closure manifest at `/etc/stereos/sandbox-closure.txt`. This enables `agentd` to create gVisor sandboxes quickly without running `nix-store -qR` at runtime.
+
+The manifest includes:
+- `stereos.agent.basePackages` (from `modules/users/agent.nix`)
+- `stereos.agent.extraPackages` (from your mixtape)
+
+## Development Profile
+
+The `profiles/dev.nix` profile is for local development only.
+
+### What It Does
+
+```nix
+# profiles/dev.nix
+{ config, lib, pkgs, ... }:
+
+let
+  sshKeyPath = builtins.getEnv "HOME" + "/.config/stereos/ssh-key.pub";
+  sshKeys =
+    let
+      exists = builtins.pathExists sshKeyPath;
+    in
+      if exists then
+        let raw = builtins.readFile sshKeyPath;
+        in [ (lib.removeSuffix "\n" raw) ]
+      else
+        [];
+in
+{
+  stereos.ssh.authorizedKeys = sshKeys;
+}
+```
+
+This reads your SSH public key from `~/.config/stereos/ssh-key.pub` and bakes it into the image for both `admin` and `agent` users.
+
+### Setup
+
+<Steps>
+  <Step title="Create config directory">
+    ```bash
+    mkdir -p ~/.config/stereos
+    ```
+  </Step>
+  
+  <Step title="Copy your SSH public key">
+    ```bash
+    cp ~/.ssh/id_ed25519.pub ~/.config/stereos/ssh-key.pub
+    ```
+  </Step>
+  
+  <Step title="Build dev mixtape">
+    ```bash
+    MIXTAPE=opencode-mixtape-dev make build-qcow2
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+  **Never use dev profile in production.** It bakes SSH keys into the image.
+  
+  Production builds inject keys ephemerally at VM launch time via stereosd/vsock.
+</Warning>
+
+## System Configuration
+
+stereOS modules provide the core system configuration.
+
+### Base Configuration
+
+From `modules/base.nix`:
+
+```nix
+{
+  # NixOS state version
+  system.stateVersion = "24.11";
+  
+  # Filesystem
+  fileSystems."/" = {
+    device = "/dev/disk/by-label/nixos";
+    fsType = "ext4";
+    autoResize = true;  # Grow on first boot
+  };
+  
+  # SSH
+  services.openssh = {
+    enable = true;
+    settings = {
+      PasswordAuthentication = false;
+      PermitRootLogin = "no";
+      KbdInteractiveAuthentication = false;
+    };
+  };
+  
+  # Nix settings
+  nix.settings = {
+    experimental-features = [ "nix-command" "flakes" ];
+    auto-optimise-store = true;
+    
+    # CRITICAL: Agent user cannot access Nix daemon
+    allowed-users = [ "root" "@wheel" ];
+    trusted-users = [ "root" ];
+  };
+  
+  # System packages
+  environment.systemPackages = with pkgs; [
+    git vim curl jq ripgrep htop tmux tree file unzip
+    ghostty.terminfo  # Terminal compatibility
+    gvisor            # Sandbox runtime
+  ];
+  
+  # Firewall
+  networking.firewall = {
+    enable = true;
+    allowedTCPPorts = [ 22 ];  # SSH only
+  };
+}
+```
+
+### Security Hardening
+
+From `modules/base.nix:boot.kernel.sysctl`:
+
+```nix
+{
+  boot.kernel.sysctl = {
+    # Restrict process tracing
+    "kernel.yama.ptrace_scope" = 2;
+    
+    # Hide kernel pointers from non-root
+    "kernel.kptr_restrict" = 2;
+    
+    # Restrict dmesg to root
+    "kernel.dmesg_restrict" = 1;
+    
+    # Disable core dumps via pipe
+    "kernel.core_pattern" = "|/bin/false";
+    
+    # Network hardening
+    "net.ipv4.conf.all.accept_redirects" = 0;
+    "net.ipv4.conf.default.accept_redirects" = 0;
+    "net.ipv6.conf.all.accept_redirects" = 0;
+    "net.ipv4.conf.all.send_redirects" = 0;
+  };
+  
+  # Ephemeral /tmp (never written to disk)
+  boot.tmp.useTmpfs = true;
+}
+```
+
+### Boot Configuration
+
+stereOS targets sub-3 second boot times. Boot optimization is in `modules/boot.nix`.
+
+## User Configuration
+
+stereOS provides two users with distinct privilege levels.
+
+### Admin User
+
+From `modules/users/admin.nix`:
+
+```nix
+{
+  users.users.admin = {
+    isNormalUser = true;
+    home = "/home/admin";
+    extraGroups = [ "wheel" ];  # Passwordless sudo
+    openssh.authorizedKeys.keys = config.stereos.ssh.authorizedKeys;
+  };
+}
+```
+
+### Agent User
+
+From `modules/users/agent.nix`:
+
+```nix
+{
+  users.users.agent = {
+    isNormalUser = true;
+    home = "/home/agent";
+    createHome = true;
+    
+    # Restricted PATH (no Nix, no system utils)
+    packages = config.stereos.agent.basePackages
+             ++ config.stereos.agent.extraPackages;
+    
+    openssh.authorizedKeys.keys = config.stereos.ssh.authorizedKeys;
+  };
+  
+  # Agent workspace
+  systemd.tmpfiles.rules = [
+    "d /home/agent/workspace 0755 agent agent -"
+  ];
+  
+  # Base packages (minimal toolset)
+  stereos.agent.basePackages = with pkgs; [
+    bash coreutils findutils gnugrep gnused gawk
+    git curl wget jq ripgrep fd tree file
+  ];
+  
+  # Deny sudo for agent
+  security.sudo.extraRules = [{
+    users = [ "agent" ];
+    commands = [{ command = "ALL"; options = [ "NOPASSWD" "DENY" ]; }];
+  }];
+}
+```
+
+<Note>
+  The agent user **cannot** access the Nix daemon (`nix.settings.allowed-users = [ "root" "@wheel" ]`). This prevents AI agents from modifying the system or installing packages.
+</Note>
+
+## Service Configuration
+
+stereOS runs two primary daemons.
+
+### stereosd
+
+From `modules/services/stereosd.nix`:
+
+```nix
+{
+  services.stereosd = {
+    enable = true;
+    # Additional stereOS-specific overrides
+  };
+}
+```
+
+### agentd
+
+From `modules/services/agentd.nix`:
+
+```nix
+{
+  services.agentd = {
+    enable = true;
+    # Additional stereOS-specific overrides
+  };
+}
+```
+
+Both services are defined by external flakes (`github:papercomputeco/stereosd`, `github:papercomputeco/agentd`) and included via `mkMixtape`.
+
+## Advanced Customization
+
+### Override System Packages
+
+Add packages to all users:
+
+```nix
+{ pkgs, ... }:
+{
+  environment.systemPackages = with pkgs; [
+    neovim
+    lazygit
+  ];
+}
+```
+
+### Custom Service
+
+Add a systemd service:
+
+```nix
+{
+  systemd.services.my-service = {
+    description = "My custom service";
+    wantedBy = [ "multi-user.target" ];
+    serviceConfig = {
+      ExecStart = "${pkgs.my-package}/bin/my-service";
+      Restart = "always";
+    };
+  };
+}
+```
+
+### Multiple Agents
+
+Combine multiple agents in one mixtape:
+
+```nix
+# mixtapes/full/base.nix
+{ pkgs, ... }:
+{
+  stereos.agent.extraPackages = with pkgs; [
+    opencode
+    claude-code
+    gemini-cli
+  ];
+}
+```
+
+### Custom Kernel
+
+Override the kernel:
+
+```nix
+{ pkgs, ... }:
+{
+  boot.kernelPackages = pkgs.linuxPackages_latest;
+}
+```
+
+### Environment Variables
+
+Set system-wide environment variables:
+
+```nix
+{
+  environment.variables = {
+    EDITOR = "vim";
+    MY_API_URL = "https://api.example.com";
+  };
+}
+```
+
+## Build Configuration
+
+### Flake Inputs
+
+From `flake.nix`:
+
+```nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    flake-parts.url = "github:hercules-ci/flake-parts";
+    dagger.url = "github:dagger/nix";
+    
+    agentd = {
+      url = "github:papercomputeco/agentd";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    
+    stereosd = {
+      url = "github:papercomputeco/stereosd";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
+}
+```
+
+### Supported Architectures
+
+stereOS supports:
+- `aarch64-linux` - ARM64 (default)
+- `x86_64-linux` - x86-64
+
+Build for specific architecture:
+
+```bash
+ARCH=x86_64-linux make build
+```
+
+Or in Nix:
+
+```nix
+mkMixtape {
+  name = "my-mixtape";
+  system = "x86_64-linux";
+  features = [ ./mixtapes/my-agent/base.nix ];
+}
+```
+
+## Image Formats
+
+stereOS produces three image formats:
+
+### Raw EFI Image
+
+**Canonical artifact.** Bootable on Apple Virtualization Framework.
+
+Defined in `formats/raw-efi.nix`:
+
+```nix
+system.build.raw = nixosSystem.config.system.build.image;
+```
+
+Build:
+
+```bash
+make build
+```
+
+Output: `result/stereos.img`
+
+### QCOW2 Image
+
+Derived from raw via `qemu-img convert`. For QEMU/KVM.
+
+Defined in `formats/qcow.nix`:
+
+```nix
+system.build.qcow2 = pkgs.runCommand "stereos-qcow2" {} ''
+  ${pkgs.qemu}/bin/qemu-img convert \
+    -f raw -O qcow2 \
+    ${system.build.raw}/nixos.img \
+    $out/stereos.qcow2
+'';
+```
+
+Build:
+
+```bash
+make build-qcow2
+```
+
+Output: `result/stereos.qcow2`
+
+### Kernel Artifacts
+
+For direct kernel boot (bypasses UEFI/GRUB).
+
+Defined in `formats/kernel-artifacts.nix`:
+
+```nix
+system.build.kernelArtifacts = pkgs.runCommand "stereos-kernel-artifacts" {} ''
+  mkdir -p $out
+  cp ${config.system.build.kernel}/bzImage $out/
+  cp ${config.system.build.initialRamdisk}/initrd $out/
+  echo "${toString config.boot.kernelParams}" > $out/cmdline
+  echo "${config.system.build.toplevel}/init" > $out/init
+'';
+```
+
+Build:
+
+```bash
+make build-kernel
+```
+
+Output: `result-kernel/{bzImage,initrd,cmdline,init}`
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Running VMs" icon="play" href="/development/running-vms">
+    Test your configuration in QEMU
+  </Card>
+  <Card title="Contributing" icon="code-pull-request" href="/development/contributing">
+    Submit your changes to stereOS
+  </Card>
+</CardGroup>

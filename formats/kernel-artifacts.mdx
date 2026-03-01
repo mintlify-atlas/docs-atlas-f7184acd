@@ -1,0 +1,367 @@
+---
+title: Kernel Artifacts
+description: Direct kernel boot artifacts for sub-3-second boot times
+---
+
+Kernel artifacts enable **direct kernel boot**, bypassing the UEFI/GRUB boot path entirely. This is the primary mechanism for achieving sub-3-second boot times in stereOS.
+
+## Overview
+
+Defined in `formats/kernel-artifacts.nix`, kernel artifacts consist of:
+
+- **bzImage**: Compressed kernel image
+- **initrd**: Initial ramdisk (initramfs)
+- **cmdline**: Kernel command-line parameters
+- **init**: Path to the NixOS stage-2 init script
+
+These files enable direct kernel boot via QEMU `-kernel/-initrd` flags or Apple Virtualization.framework's `VZLinuxBootLoader`.
+
+## Build Commands
+
+<Tabs>
+  <Tab title="Nix">
+    ```bash
+    nix build .#packages.aarch64-linux.<mixtape-name>-kernel-artifacts --impure
+    ```
+    
+    Result symlink: `result-kernel/`
+  </Tab>
+  <Tab title="Makefile">
+    ```bash
+    make build-kernel MIXTAPE=<mixtape-name>
+    ```
+    
+    Default mixtape: `opencode-mixtape`
+  </Tab>
+</Tabs>
+
+<Note>
+  The `result-kernel` symlink is used to avoid conflicts with the `result` symlink from other builds.
+</Note>
+
+## Build Attribute Path
+
+The kernel artifacts are exposed via the NixOS configuration's `system.build.kernelArtifacts` attribute:
+
+```nix
+config.system.build.kernelArtifacts
+```
+
+The flake packages map each mixtape with a `-kernel-artifacts` suffix:
+
+```nix
+packages.aarch64-linux.<mixtape-name>-kernel-artifacts = 
+  nixosConfigurations.<mixtape-name>.config.system.build.kernelArtifacts
+```
+
+## Configuration
+
+From `formats/kernel-artifacts.nix`:
+
+```nix
+system.build.kernelArtifacts = pkgs.runCommand "${imageName}-kernel-artifacts" {} ''
+  mkdir -p $out
+
+  # Kernel image (bzImage / Image depending on architecture)
+  cp ${config.boot.kernelPackages.kernel}/${config.system.boot.loader.kernelFile} \
+     $out/bzImage
+
+  # Initrd — the .gz file produced by NixOS
+  cp ${config.system.build.initialRamdisk}/initrd \
+     $out/initrd
+
+  # Kernel command line: join the list with spaces, strip trailing newline.
+  # We append "init=<toplevel>/init" so the kernel hands off to NixOS
+  # stage-2 directly (required for direct-kernel boot without a bootloader).
+  printf '%s' "${lib.concatStringsSep " " config.boot.kernelParams} init=${config.system.build.toplevel}/init" \
+    > $out/cmdline
+
+  # Convenience symlink: the NixOS stage-2 init path
+  echo "${config.system.build.toplevel}/init" > $out/init
+'';
+```
+
+## Artifact Files
+
+After building, the `result-kernel/` directory contains:
+
+```
+result-kernel/
+├── bzImage          # Compressed kernel image (ARM64: Image)
+├── initrd           # Initramfs (gzip-compressed cpio archive)
+├── cmdline          # Kernel command-line parameters (one line)
+└── init             # Path to NixOS stage-2 init
+```
+
+### bzImage
+
+The kernel image file. On ARM64, this is technically called `Image`, but stereOS symlinks it as `bzImage` for consistency.
+
+- **Size**: 10-30 MB (depends on kernel configuration)
+- **Format**: ARM64 kernel image (not x86 bzImage format)
+- **Source**: `config.boot.kernelPackages.kernel`
+
+### initrd
+
+The initial ramdisk containing the stage-1 boot system:
+
+- **Size**: 50-150 MB (depends on included modules)
+- **Format**: gzip-compressed cpio archive
+- **Contents**: Essential kernel modules, mount utilities, stage-1 init
+- **Source**: `config.system.build.initialRamdisk`
+
+### cmdline
+
+Kernel command-line parameters as a single line:
+
+```
+console=ttyAMA0 systemd.unified_cgroup_hierarchy=1 init=/nix/store/.../init
+```
+
+- **Format**: Space-separated parameters, no trailing newline
+- **init parameter**: Points to the NixOS stage-2 init script
+- **Source**: `config.boot.kernelParams` + init path
+
+### init
+
+The full Nix store path to the NixOS stage-2 init script:
+
+```
+/nix/store/abcdef123456-nixos-system-stereos-mixtape/init
+```
+
+This is a convenience file for debugging and verification.
+
+## Boot Methods
+
+### QEMU Direct Kernel Boot
+
+Boot a QCOW2 disk image with direct kernel boot:
+
+```bash
+qemu-system-aarch64 \
+  -M virt \
+  -cpu cortex-a72 \
+  -m 4G \
+  -kernel result-kernel/bzImage \
+  -initrd result-kernel/initrd \
+  -append "$(cat result-kernel/cmdline)" \
+  -drive file=result/stereos.qcow2,if=virtio \
+  -nographic
+```
+
+<Note>
+  The `scripts/run-vm.sh` script automatically uses direct kernel boot if kernel artifacts are present.
+</Note>
+
+### Apple Virtualization.framework
+
+Use `VZLinuxBootLoader` for direct kernel boot:
+
+```swift
+import Virtualization
+
+let kernelURL = URL(fileURLWithPath: "result-kernel/bzImage")
+let initrdURL = URL(fileURLWithPath: "result-kernel/initrd")
+let cmdline = try String(contentsOfFile: "result-kernel/cmdline")
+
+let bootLoader = VZLinuxBootLoader(kernelURL: kernelURL)
+bootLoader.initialRamdiskURL = initrdURL
+bootLoader.commandLine = cmdline
+
+let config = VZVirtualMachineConfiguration()
+config.bootLoader = bootLoader
+// ... add disk, network, etc.
+```
+
+### Boot Time Comparison
+
+| Boot Method | Typical Boot Time | Use Case |
+|-------------|-------------------|----------|
+| **UEFI/GRUB** | 4-6 seconds | Production, compatibility |
+| **Direct kernel boot** | 2-3 seconds | Development, fast iteration |
+
+The direct kernel boot method saves 2-3 seconds by skipping:
+- UEFI firmware initialization
+- GRUB menu and configuration parsing
+- Bootloader kernel loading
+
+## Use Cases
+
+### Fast Development Cycles
+
+Direct kernel boot dramatically speeds up VM launches during development:
+
+```bash
+# Build and run with direct kernel boot
+make build-qcow2 MIXTAPE=opencode-mixtape
+make build-kernel MIXTAPE=opencode-mixtape
+make run MIXTAPE=opencode-mixtape
+```
+
+The `run` target automatically uses direct kernel boot if kernel artifacts are present.
+
+### Cloud-Init Integration
+
+Kernel artifacts can be used with cloud-init for fast provisioning:
+
+```yaml
+# cloud-config
+write_files:
+  - path: /boot/cmdline
+    content: |
+      console=ttyS0 init=/nix/store/.../init cloud-init=local
+```
+
+### Debugging Boot Issues
+
+Direct kernel boot provides more visibility into early boot:
+
+```bash
+qemu-system-aarch64 \
+  -kernel result-kernel/bzImage \
+  -initrd result-kernel/initrd \
+  -append "$(cat result-kernel/cmdline) systemd.log_level=debug" \
+  -drive file=result/stereos.qcow2,if=virtio \
+  -serial stdio
+```
+
+### Kernel Parameter Experimentation
+
+Test kernel parameters without rebuilding the image:
+
+```bash
+# Add a custom parameter
+qemu-system-aarch64 \
+  -kernel result-kernel/bzImage \
+  -initrd result-kernel/initrd \
+  -append "$(cat result-kernel/cmdline) my.custom.param=value" \
+  -drive file=result/stereos.qcow2,if=virtio
+```
+
+## Boot Process
+
+The direct kernel boot process:
+
+1. **Hypervisor** loads the kernel image into VM memory
+2. **Hypervisor** loads the initrd into memory
+3. **Hypervisor** passes the cmdline to the kernel
+4. **Kernel** decompresses and starts
+5. **Kernel** unpacks the initrd and mounts it as rootfs
+6. **Stage-1 init** (from initrd) mounts the real root filesystem
+7. **Stage-1 init** pivots root and execs stage-2 init
+8. **Stage-2 init** (from cmdline) starts systemd and services
+
+Total time: 2-3 seconds (stereOS target: less than 3 seconds)
+
+## Kernel Parameters
+
+Common kernel parameters in stereOS:
+
+| Parameter | Purpose |
+|-----------|----------|
+| `console=ttyAMA0` | Serial console output (ARM64) |
+| `systemd.unified_cgroup_hierarchy=1` | Enable cgroups v2 |
+| `init=/nix/store/.../init` | NixOS stage-2 init path |
+| `quiet` | Suppress verbose kernel messages |
+| `loglevel=4` | Kernel log level (4=warning) |
+
+Customize parameters in your mixtape configuration:
+
+```nix
+boot.kernelParams = [
+  "console=ttyAMA0"
+  "systemd.unified_cgroup_hierarchy=1"
+  "my.custom.param=value"
+];
+```
+
+## Artifact Verification
+
+Verify the kernel artifacts are valid:
+
+```bash
+# Check kernel image
+file result-kernel/bzImage
+# Expected: Linux kernel ARM64 boot executable Image
+
+# Check initrd
+file result-kernel/initrd
+# Expected: gzip compressed data
+
+# Check cmdline
+cat result-kernel/cmdline
+# Expected: Space-separated parameters ending with init=...
+
+# Check init path
+cat result-kernel/init
+# Expected: /nix/store/...-nixos-system-.../init
+```
+
+## Disk Image Requirement
+
+<Warning>
+  Kernel artifacts **require a disk image** to boot. The initrd mounts the root filesystem from the disk, which contains the full NixOS closure.
+</Warning>
+
+Direct kernel boot does not eliminate the need for a disk image - it only bypasses the bootloader. The disk must still contain:
+
+- `/nix/store` with the complete system closure
+- The stage-2 init script referenced in cmdline
+- System configuration and services
+
+For diskless boot, consider using NixOS's netboot infrastructure (not covered in stereOS).
+
+## Related Formats
+
+<CardGroup cols={2}>
+  <Card title="QCOW2" icon="box" href="/formats/qcow2">
+    Disk image format for use with kernel artifacts
+  </Card>
+  <Card title="Distribution" icon="package" href="/formats/distribution">
+    Complete bundle including kernel artifacts
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+### "No init found" kernel panic
+
+The init path in cmdline is invalid. Verify the init file:
+
+```bash
+cat result-kernel/init
+# Should be a valid /nix/store path
+
+ls -la $(cat result-kernel/init)
+# Should exist in the disk image
+```
+
+### initrd mount failure
+
+The initrd may be missing required modules. Rebuild with additional modules:
+
+```nix
+boot.initrd.availableKernelModules = [
+  "virtio_blk"
+  "virtio_pci"
+  "virtio_net"
+  # Add additional modules as needed
+];
+```
+
+### Kernel boot hangs
+
+Increase kernel log level for debugging:
+
+```bash
+qemu-system-aarch64 \
+  -kernel result-kernel/bzImage \
+  -initrd result-kernel/initrd \
+  -append "$(cat result-kernel/cmdline) loglevel=7" \
+  ...
+```
+
+### cmdline too long
+
+Kernel command lines have a maximum length (typically 2048 bytes). If exceeded, reduce parameters or move configuration to a file in the initrd.

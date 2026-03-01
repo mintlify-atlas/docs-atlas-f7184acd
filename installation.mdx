@@ -1,0 +1,450 @@
+---
+title: Installation
+description: Detailed installation and configuration guide for stereOS
+---
+
+# Installation
+
+This guide covers detailed installation instructions for stereOS, including system requirements, build options, and advanced configuration.
+
+## System requirements
+
+### Hardware requirements
+
+- **CPU**: 64-bit processor (x86_64 or aarch64)
+- **RAM**: Minimum 4GB (8GB recommended for development)
+- **Disk**: 10GB free space for builds and images
+- **Virtualization**: Hardware virtualization support (Intel VT-x, AMD-V, or Apple Silicon)
+
+### Software requirements
+
+<CardGroup cols={2}>
+  <Card title="Nix package manager" icon="box">
+    Version 2.4+ with flakes and nix-command enabled
+  </Card>
+  
+  <Card title="Virtualization platform" icon="server">
+    QEMU, KVM, or Apple Virtualization Framework
+  </Card>
+</CardGroup>
+
+## Installing Nix
+
+If you don't have Nix installed, follow these steps:
+
+<Steps>
+  <Step title="Install Nix">
+    Install Nix with flakes support:
+    
+    ```bash
+    curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | sh -s -- install
+    ```
+    
+    This installer automatically enables flakes and the nix-command feature.
+  </Step>
+
+  <Step title="Verify installation">
+    Confirm Nix is installed correctly:
+    
+    ```bash
+    nix --version
+    ```
+    
+    You should see output like: `nix (Nix) 2.18.0`
+  </Step>
+</Steps>
+
+<Warning>
+If you already have Nix installed without flakes, you'll need to enable them in your Nix configuration.
+</Warning>
+
+## Building stereOS
+
+### Clone the repository
+
+First, clone the stereOS repository:
+
+```bash
+cd ~/projects
+git clone https://github.com/papercomputeco/stereOS.git
+cd stereOS
+```
+
+### Build targets
+
+stereOS supports multiple build targets for different use cases:
+
+<Tabs>
+  <Tab title="Raw EFI image">
+    Build the canonical raw EFI disk image:
+    
+    ```bash
+    make build
+    ```
+    
+    This creates `result/stereos.img`, a raw disk image bootable via EFI. This format works with:
+    - Apple Virtualization Framework
+    - QEMU (after conversion to qcow2)
+    - Cloud platforms supporting raw images
+    
+    **Direct Nix command:**
+    ```bash
+    nix build .#packages.aarch64-linux.opencode-mixtape --impure
+    ```
+  </Tab>
+  
+  <Tab title="QCOW2 image">
+    Build a QCOW2 image optimized for QEMU/KVM:
+    
+    ```bash
+    make build-qcow2
+    ```
+    
+    This creates `result/stereos.qcow2`, derived from the raw image via `qemu-img convert`.
+    
+    **Direct Nix command:**
+    ```bash
+    nix build .#packages.aarch64-linux.opencode-mixtape-qcow2 --impure
+    ```
+  </Tab>
+  
+  <Tab title="Kernel artifacts">
+    Build kernel artifacts for direct-kernel boot:
+    
+    ```bash
+    make build-kernel
+    ```
+    
+    This creates `result-kernel/` with:
+    - `bzImage` - Kernel image
+    - `initrd` - Initial ramdisk
+    - `cmdline` - Kernel command line
+    - `init` - NixOS stage-2 init path
+    
+    **Direct Nix command:**
+    ```bash
+    nix build .#packages.aarch64-linux.opencode-mixtape-kernel-artifacts --impure -o result-kernel
+    ```
+    
+    <Note>
+    Direct kernel boot bypasses UEFI/GRUB, reducing boot time by 2-4 seconds.
+    </Note>
+  </Tab>
+  
+  <Tab title="Distribution archive">
+    Build all formats with compression for distribution:
+    
+    ```bash
+    make dist
+    ```
+    
+    This creates `result/` containing:
+    - All image formats (raw, qcow2, kernel artifacts)
+    - Zstd-compressed variants (`.zst` files)
+    - `mixtape.toml` manifest with SHA-256 checksums
+    
+    **Distribution structure:**
+    ```
+    result/
+    ├── stereos.img          # Raw EFI disk
+    ├── stereos.img.zst      # Zstd-compressed raw
+    ├── stereos.qcow2        # QCOW2 disk
+    ├── stereos.qcow2.zst    # Zstd-compressed QCOW2
+    ├── bzImage              # Kernel
+    ├── initrd               # Init RAM
+    ├── cmdline              # Kernel command line
+    ├── init                 # NixOS stage-2 init
+    └── mixtape.toml         # Build manifest
+    ```
+  </Tab>
+</Tabs>
+
+### Selecting a mixtape
+
+By default, builds use the `opencode-mixtape`. To build a different mixtape:
+
+```bash
+# Build Claude Code mixtape
+MIXTAPE=claude-code-mixtape make build-qcow2
+
+# Build Gemini CLI mixtape
+MIXTAPE=gemini-cli-mixtape make build-qcow2
+
+# Build full mixtape (all agents)
+MIXTAPE=full-mixtape make build-qcow2
+```
+
+### Architecture selection
+
+stereOS supports both aarch64 and x86_64:
+
+```bash
+# Build for Apple Silicon (default)
+ARCH=aarch64-linux make build-qcow2
+
+# Build for x86_64
+ARCH=x86_64-linux make build-qcow2
+```
+
+## Running stereOS
+
+### Using the Makefile
+
+The simplest way to run stereOS:
+
+```bash
+make run
+```
+
+This automatically:
+1. Builds the QCOW2 image if not present
+2. Builds kernel artifacts for direct boot if not present
+3. Launches QEMU with appropriate settings
+4. Sets up SSH port forwarding on port 2222
+
+### Manual QEMU launch
+
+For more control, use the run script directly:
+
+```bash
+./scripts/run-vm.sh result/stereos.qcow2 2222
+```
+
+**Script parameters:**
+- **First argument**: Path to image file (`.img` or `.qcow2`)
+- **Second argument**: SSH port for port forwarding (default: 2222)
+
+### QEMU configuration
+
+The VM runs with these settings:
+
+```bash
+qemu-system-aarch64 \
+  -machine virt,highmem=on \
+  -accel hvf \
+  -cpu host \
+  -m 4G \
+  -smp 4 \
+  -kernel result-kernel/bzImage \
+  -initrd result-kernel/initrd \
+  -append "$(cat result-kernel/cmdline)" \
+  -drive if=virtio,format=qcow2,file=stereos.qcow2 \
+  -device virtio-net-pci,netdev=net0 \
+  -netdev user,id=net0,hostfwd=tcp::2222-:22 \
+  -device vhost-vsock-pci,guest-cid=3  # Linux hosts only
+```
+
+<Note>
+On macOS, the `-accel hvf` flag uses the Hypervisor.framework for native virtualization. On Linux, use `-accel kvm` instead.
+</Note>
+
+## Development builds
+
+Development builds include SSH key injection for passwordless access:
+
+<Steps>
+  <Step title="Create SSH key configuration">
+    Set up your SSH public key for injection:
+    
+    ```bash
+    mkdir -p ~/.config/stereos
+    cp ~/.ssh/id_ed25519.pub ~/.config/stereos/ssh-key.pub
+    ```
+  </Step>
+
+  <Step title="Build dev mixtape">
+    Build a development variant with SSH keys:
+    
+    ```bash
+    nix build .#nixosConfigurations.opencode-mixtape-dev.config.system.build.qcow2 --impure
+    ```
+    
+    The SSH key from `~/.config/stereos/ssh-key.pub` will be injected into both the `admin` and `agent` users.
+  </Step>
+
+  <Step title="Run and connect">
+    Launch and connect to the dev VM:
+    
+    ```bash
+    ./scripts/run-vm.sh result/stereos.qcow2 2222
+    
+    # In another terminal:
+    ssh -p 2222 admin@localhost
+    ```
+    
+    No password required!
+  </Step>
+</Steps>
+
+<Warning>
+Dev builds are for local development only. Never deploy dev builds to production as they contain baked-in SSH credentials.
+</Warning>
+
+## Configuration options
+
+### NixOS options
+
+stereOS exposes two custom NixOS options:
+
+<ParamField path="stereos.ssh.authorizedKeys" type="listOf str" default="[]">
+  SSH public keys for admin and agent users. Useful for development purposes.
+  
+  ```nix
+  stereos.ssh.authorizedKeys = [
+    "ssh-ed25519 AAAAC3... user@host"
+  ];
+  ```
+</ParamField>
+
+<ParamField path="stereos.agent.extraPackages" type="listOf package" default="[]">
+  Additional packages added to the agent's restricted PATH.
+  
+  ```nix
+  stereos.agent.extraPackages = [ pkgs.python3 pkgs.nodejs ];
+  ```
+</ParamField>
+
+### Creating custom mixtapes
+
+You can create custom mixtapes by using the `mkMixtape` helper:
+
+```nix
+# custom-mixtape.nix
+{ inputs, ... }:
+
+let
+  stereos-lib = import ./lib { inherit inputs; };
+in
+{
+  nixosConfigurations.custom-mixtape = stereos-lib.mkMixtape {
+    name = "custom-mixtape";
+    features = [
+      ./mixtapes/opencode/base.nix
+      ./my-custom-config.nix
+    ];
+  };
+}
+```
+
+**mkMixtape parameters:**
+- `name` - Mixtape name (used in hostname)
+- `features` - List of NixOS modules to include
+- `extraModules` - Optional additional modules (e.g., dev profile)
+
+## Accessing the VM
+
+### SSH access
+
+Connect to the running VM:
+
+<CodeGroup>
+```bash Admin user
+# Using make target
+make ssh-admin
+
+# Direct SSH
+ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 admin@localhost
+```
+
+```bash Agent user
+# Using make target  
+make ssh-agent
+
+# Direct SSH
+ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 agent@localhost
+```
+</CodeGroup>
+
+<Note>
+The `-o StrictHostKeyChecking=no` flags are used for dev builds since the host key changes with each build.
+</Note>
+
+### User environment
+
+**Admin user (`/home/admin`):**
+- Full system access
+- Passwordless sudo
+- Member of `wheel` and `admin` groups
+- Access to Nix package management
+
+**Agent user (`/home/agent/workspace`):**
+- Restricted shell environment
+- No sudo access
+- Denied access to Nix daemon
+- Workspace at `~/workspace`
+
+## Troubleshooting
+
+### Build fails with "cannot fetch"
+
+If builds fail with network errors, try:
+
+```bash
+# Clear Nix evaluation cache
+nix flake update
+
+# Retry build
+make build-qcow2
+```
+
+### QEMU fails to start
+
+Ensure you're running from the Nix devShell:
+
+```bash
+nix develop
+make run
+```
+
+### SSH connection refused
+
+Wait a few seconds after boot for SSH to start:
+
+```bash
+# Wait for SSH to be ready
+sleep 5
+make ssh-admin
+```
+
+### VM won't boot on macOS
+
+Ensure you have the QEMU AARCH64 UEFI firmware:
+
+```bash
+# Enter devShell (provides STEREOS_EFI_CODE)
+nix develop
+
+# Build kernel artifacts to use direct boot instead
+make build-kernel
+make run
+```
+
+## External dependencies
+
+stereOS depends on these external Nix flakes:
+
+| Flake input | Repository | Provides |
+|-------------|-----------|----------|
+| `nixpkgs` | `nixpkgs-unstable` | Base packages and NixOS |
+| `agentd` | `github:papercomputeco/agentd` | Agent management daemon and NixOS module |
+| `stereosd` | `github:papercomputeco/stereosd` | System daemon and control plane |
+| `dagger` | `github:dagger/nix` | CI engine for checks |
+| `flake-parts` | `github:hercules-ci/flake-parts` | Flake organization framework |
+
+## Next steps
+
+Now that you have stereOS installed:
+
+<CardGroup cols={3}>
+  <Card title="Architecture" icon="diagram-project" href="/concepts/architecture">
+    Learn about the system design
+  </Card>
+  
+  <Card title="Configuration" icon="gear" href="/development/configuration">
+    Customize your stereOS installation
+  </Card>
+  
+  <Card title="Development" icon="code" href="/development/building">
+    Contribute to stereOS
+  </Card>
+</CardGroup>

@@ -1,0 +1,398 @@
+---
+title: Creating Custom Mixtapes
+description: Build your own stereOS configurations with custom agents and tools
+---
+
+stereOS is designed to be extensible. You can create custom mixtapes that include your own selection of tools, agents, and configurations while maintaining the security and isolation guarantees of the base system.
+
+## The mkMixtape Function
+
+All mixtapes are built using the `mkMixtape` helper function defined in `lib/default.nix`. This function assembles a complete NixOS system configuration from modular components.
+
+### Function Signature
+
+```nix
+mkMixtape = { 
+  name,           # System hostname (e.g., "my-custom-mixtape")
+  features ? [],  # List of feature modules to include
+  system ? "aarch64-linux",  # Target architecture
+  extraModules ? []  # Additional modules (e.g., profiles/dev.nix)
+}
+```
+
+### What mkMixtape Does
+
+The function automatically includes:
+
+1. **External flake modules**: `agentd` and `stereosd` NixOS modules + overlays
+2. **stereOS module tree**: Core modules from `modules/` directory
+3. **Base profile**: Shared foundation from `profiles/base.nix`
+4. **Sandbox manifest**: Pre-computed Nix store closure for fast gVisor boot
+5. **Your features**: Custom feature modules you specify
+6. **Extra modules**: Optional modules like `profiles/dev.nix`
+
+## Creating a Simple Mixtape
+
+Let's create a custom mixtape with Node.js and Python tooling.
+
+### Step 1: Create a Feature Module
+
+Create `mixtapes/nodejs-python/base.nix`:
+
+```nix
+{ config, lib, pkgs, ... }:
+
+{
+  # Add development tools to the agent's PATH
+  stereos.agent.extraPackages = with pkgs; [
+    nodejs_20
+    python311
+    python311Packages.pip
+    python311Packages.virtualenv
+  ];
+
+  # Also make them available system-wide
+  environment.systemPackages = with pkgs; [
+    nodejs_20
+    python311
+  ];
+
+  # Set up environment variables
+  environment.variables = {
+    NODE_ENV = "production";
+    PYTHON_VERSION = "3.11";
+  };
+}
+```
+
+### Step 2: Register in flake.nix
+
+Add your mixtape to the `nixosConfigurations` in `flake.nix`:
+
+```nix
+{
+  outputs = inputs@{ flake-parts, ... }:
+    let
+      stereos-lib = import ./lib { inherit inputs; };
+    in
+    flake-parts.lib.mkFlake { inherit inputs; } {
+      flake = {
+        nixosConfigurations = {
+          # Your custom mixtape
+          nodejs-python-mixtape = stereos-lib.mkMixtape {
+            name = "nodejs-python-mixtape";
+            features = [ ./mixtapes/nodejs-python/base.nix ];
+          };
+
+          # Dev variant
+          nodejs-python-mixtape-dev = stereos-lib.mkMixtape {
+            name = "nodejs-python-mixtape";
+            features = [ ./mixtapes/nodejs-python/base.nix ];
+            extraModules = [ ./profiles/dev.nix ];
+          };
+        };
+      };
+    };
+}
+```
+
+### Step 3: Build Your Mixtape
+
+```bash
+# Build raw EFI image
+nix build .#nixosConfigurations.nodejs-python-mixtape.config.system.build.raw
+
+# Build QCOW2 image
+nix build .#nixosConfigurations.nodejs-python-mixtape.config.system.build.qcow2
+
+# Build all formats
+nix build .#nixosConfigurations.nodejs-python-mixtape.config.system.build.dist
+```
+
+## Advanced Example: Custom AI Agent
+
+Here's a more complex example that adds a custom AI agent with configuration:
+
+```nix
+# mixtapes/my-agent/base.nix
+{ config, lib, pkgs, ... }:
+
+let
+  # Build a custom package (if not in nixpkgs)
+  myAgent = pkgs.buildGoModule rec {
+    pname = "my-agent";
+    version = "1.0.0";
+    src = ./.; # Your agent source
+    vendorHash = "sha256-...";
+  };
+in
+{
+  # Add your agent to the agent's PATH
+  stereos.agent.extraPackages = [ myAgent ];
+
+  # System-wide availability
+  environment.systemPackages = [ myAgent ];
+
+  # Seed configuration file
+  environment.etc."skel/.config/my-agent/config.yaml".text = '''
+    provider: anthropic
+    model: claude-3-5-sonnet-20241022
+    temperature: 0.7
+  ''';
+
+  # Set environment variables
+  environment.variables = {
+    MY_AGENT_CONFIG = "/home/agent/.config/my-agent/config.yaml";
+  };
+
+  # Create additional directories
+  systemd.tmpfiles.rules = [
+    "d /home/agent/.config/my-agent 0755 agent agent -"
+    "d /home/agent/.cache/my-agent 0755 agent agent -"
+  ];
+}
+```
+
+## Composing Multiple Features
+
+You can combine multiple feature modules in a single mixtape:
+
+```nix
+my-full-dev-mixtape = stereos-lib.mkMixtape {
+  name = "my-full-dev-mixtape";
+  features = [
+    ./mixtapes/opencode/base.nix
+    ./mixtapes/nodejs-python/base.nix
+    ./mixtapes/my-agent/base.nix
+    ./features/docker.nix  # Custom feature module
+  ];
+  extraModules = [ ./profiles/dev.nix ];
+};
+```
+
+## Understanding stereos.agent Options
+
+stereOS provides two key options for customizing the agent environment:
+
+### stereos.agent.extraPackages
+
+Adds packages to the agent's restricted PATH:
+
+```nix
+stereos.agent.extraPackages = [ pkgs.nodejs pkgs.python3 ];
+```
+
+- Packages are available to the agent user
+- Included in the gVisor sandbox closure
+- Automatically added to the restricted PATH
+
+### stereos.agent.basePackages
+
+Override the default base packages (use with caution):
+
+```nix
+stereos.agent.basePackages = with pkgs; [
+  # Core POSIX utilities (required)
+  coreutils gnugrep gnused gawk findutils diffutils
+  
+  # Your custom base set
+  git curl jq vim bash
+];
+```
+
+<Warning>
+Overriding `basePackages` can break core functionality. Only do this if you need fine-grained control over the base environment. In most cases, use `extraPackages` instead.
+</Warning>
+
+## Best Practices
+
+### 1. Use Descriptive Names
+
+Name your mixtapes clearly to indicate their purpose:
+
+```nix
+# Good
+backend-dev-mixtape
+frontend-toolchain-mixtape
+ml-training-mixtape
+
+# Less clear
+mixtape1
+my-mixtape
+test
+```
+
+### 2. Keep Feature Modules Focused
+
+Each feature module should have a single responsibility:
+
+```nix
+# Good: Separate modules
+mixtures/nodejs/base.nix
+mixtures/python/base.nix
+mixtures/rust/base.nix
+
+# Less maintainable: Everything in one
+mixtures/all-languages/base.nix
+```
+
+### 3. Document Required Environment Variables
+
+Add comments to your feature modules:
+
+```nix
+# mixtapes/my-agent/base.nix
+#
+# My Custom AI Agent — interactive coding assistant
+#
+# Required environment variables at runtime:
+#   MY_AGENT_API_KEY - API key for the service
+#   MY_AGENT_MODEL (optional) - Model name (defaults to gpt-4)
+
+{ config, lib, pkgs, ... }:
+# ...
+```
+
+### 4. Create Dev Variants
+
+Always provide a dev variant for testing:
+
+```nix
+# Production
+my-mixtape = stereos-lib.mkMixtape {
+  name = "my-mixtape";
+  features = [ ./mixtapes/my-feature/base.nix ];
+};
+
+# Development
+my-mixtape-dev = stereos-lib.mkMixtape {
+  name = "my-mixtape";
+  features = [ ./mixtapes/my-feature/base.nix ];
+  extraModules = [ ./profiles/dev.nix ];
+};
+```
+
+### 5. Test Before Deploying
+
+Test your mixtape locally before deployment:
+
+```bash
+# Build the dev variant
+nix build .#nixosConfigurations.my-mixtape-dev.config.system.build.qcow2
+
+# Run in QEMU
+./scripts/run-vm.sh result/nixos.qcow2
+
+# SSH into the VM (if dev profile is enabled)
+ssh agent@localhost -p 2222
+```
+
+## Architecture-Specific Builds
+
+You can specify the target architecture:
+
+```nix
+# ARM64 (default)
+aarch64-mixtape = stereos-lib.mkMixtape {
+  name = "my-mixtape";
+  system = "aarch64-linux";
+  features = [ ./mixtapes/my-feature/base.nix ];
+};
+
+# x86_64
+x86-64-mixtape = stereos-lib.mkMixtape {
+  name = "my-mixtape";
+  system = "x86_64-linux";
+  features = [ ./mixtapes/my-feature/base.nix ];
+};
+```
+
+## Working with the Sandbox Closure
+
+The `mkSandboxManifest` function automatically pre-computes the Nix store closure for your mixtape's packages. This manifest is used by `agentd` to quickly boot gVisor sandboxes without running `nix-store -qR` at runtime.
+
+The manifest includes:
+- All packages from `stereos.agent.basePackages`
+- All packages from `stereos.agent.extraPackages`
+- Their full dependency closure
+
+The manifest is installed to `/etc/stereos/sandbox-closure.txt` and contains the Nix store paths needed for the sandbox.
+
+## Debugging Custom Mixtapes
+
+If your mixtape doesn't build or behaves unexpectedly:
+
+### Check the Build Output
+
+```bash
+nix build .#nixosConfigurations.my-mixtape.config.system.build.raw --show-trace
+```
+
+### Inspect the System Configuration
+
+```bash
+# Show all system options
+nix eval .#nixosConfigurations.my-mixtape.config.system --json | jq
+
+# Check agent packages
+nix eval .#nixosConfigurations.my-mixtape.config.stereos.agent.extraPackages
+```
+
+### Test in a VM
+
+```bash
+# Build and run
+nix build .#nixosConfigurations.my-mixtape-dev.config.system.build.qcow2
+./scripts/run-vm.sh result/nixos.qcow2
+
+# Check what's in the agent's PATH
+ssh agent@localhost -p 2222 'echo $PATH'
+ssh agent@localhost -p 2222 'which my-agent'
+```
+
+## Example Repository Structure
+
+A well-organized custom mixtape repository:
+
+```
+my-stereos-fork/
+├── flake.nix
+├── flake.lock
+├── lib/
+│   └── default.nix
+├── mixtapes/
+│   ├── opencode/
+│   │   └── base.nix
+│   ├── my-agent/
+│   │   ├── base.nix
+│   │   └── default-config.yaml
+│   └── full-dev/
+│       └── base.nix
+├── features/
+│   ├── nodejs.nix
+│   ├── python.nix
+│   └── docker.nix
+├── modules/
+│   └── ... (from upstream)
+├── profiles/
+│   ├── base.nix
+│   └── dev.nix
+└── README.md
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Running VMs" icon="rocket" href="/development/running-vms">
+    Learn how to deploy custom mixtapes
+  </Card>
+  <Card title="NixOS Modules" icon="puzzle-piece" href="/api/modules/overview">
+    Deep dive into stereOS module system
+  </Card>
+  <Card title="Agent Security" icon="shield" href="/concepts/security">
+    Understand the security model
+  </Card>
+  <Card title="Example Mixtapes" icon="code" href="/mixtapes/overview">
+    Study existing mixtape configurations
+  </Card>
+</CardGroup>

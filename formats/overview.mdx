@@ -1,0 +1,113 @@
+---
+title: Image Formats
+description: Overview of stereOS image formats and build outputs
+---
+
+stereOS produces multiple image formats to support different virtualization backends and deployment scenarios. Each format is optimized for specific use cases and can be built independently or as part of a distribution bundle.
+
+## Available Formats
+
+<CardGroup cols={2}>
+  <Card title="Raw EFI" icon="hard-drive" href="/formats/raw-efi">
+    Canonical disk image format. Used by Apple Virtualization.framework and as the base for all other formats.
+  </Card>
+  <Card title="QCOW2" icon="box" href="/formats/qcow2">
+    Compressed disk image for QEMU and KVM/libvirt backends. Derived from the raw image.
+  </Card>
+  <Card title="Kernel Artifacts" icon="rocket" href="/formats/kernel-artifacts">
+    Direct kernel boot files (bzImage, initrd, cmdline) for sub-3-second boot times.
+  </Card>
+  <Card title="Distribution" icon="package" href="/formats/distribution">
+    Complete distribution bundle with all formats, checksums, and manifest.
+  </Card>
+</CardGroup>
+
+## Build Targets
+
+All image formats are exposed as Nix flake packages with consistent naming:
+
+```bash
+# Raw EFI disk image (canonical)
+nix build .#packages.aarch64-linux.<mixtape-name> --impure
+
+# QCOW2 for QEMU/KVM
+nix build .#packages.aarch64-linux.<mixtape-name>-qcow2 --impure
+
+# Kernel artifacts for direct boot
+nix build .#packages.aarch64-linux.<mixtape-name>-kernel-artifacts --impure
+
+# Complete distribution bundle
+nix build .#packages.aarch64-linux.<mixtape-name>-dist --impure
+```
+
+<Note>
+  Replace `<mixtape-name>` with your mixtape identifier (e.g., `opencode-mixtape`, `claude-code-mixtape`).
+</Note>
+
+## Makefile Shortcuts
+
+For convenience, the Makefile provides simplified build commands:
+
+```bash
+# Build raw image
+make build MIXTAPE=opencode-mixtape
+
+# Build QCOW2 image
+make build-qcow2 MIXTAPE=opencode-mixtape
+
+# Build kernel artifacts
+make build-kernel MIXTAPE=opencode-mixtape
+
+# Build complete distribution
+make dist MIXTAPE=opencode-mixtape
+```
+
+## Architecture
+
+All stereOS images target **aarch64-linux** (ARM64) architecture exclusively. This ensures optimal performance on Apple Silicon and modern ARM-based cloud instances.
+
+## Format Selection Guide
+
+| Format | Use Case | Backend | Boot Method |
+|--------|----------|---------|-------------|
+| **Raw EFI** | Apple Virtualization.framework, OCI base | Apple VZ | UEFI/GRUB |
+| **QCOW2** | QEMU, KVM, libvirt | QEMU/KVM | UEFI/GRUB or direct kernel |
+| **Kernel Artifacts** | Fast development cycles, cloud-init | QEMU, Apple VZ | Direct kernel boot |
+| **Distribution** | Publishing, CI/CD, releases | All | All methods |
+
+## Image Composition
+
+All disk image formats (raw, QCOW2) include:
+
+- **GPT partition table** with EFI System Partition (ESP)
+- **systemd-boot** bootloader on the ESP
+- **ext4 root filesystem** with the complete NixOS closure
+- **Automatic sizing**: Closure size + 1GB free space for agent work
+- **No Nix channels**: Pure flake-based configuration
+
+## Build Process
+
+The format hierarchy is defined in `flake/images.nix`:
+
+1. **Raw image** is the canonical artifact (`system.build.raw`)
+2. **QCOW2** is derived from raw via `qemu-img convert`
+3. **Kernel artifacts** are extracted from the NixOS configuration
+4. **Distribution** bundles all formats with compression and checksums
+
+Each format is defined in its own module under `formats/`:
+
+- `formats/raw-efi.nix` - Raw disk image builder
+- `formats/qcow.nix` - QCOW2 converter
+- `formats/kernel-artifacts.nix` - Kernel boot artifact extractor
+- `lib/dist.nix` - Distribution bundle assembler
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Raw EFI Format" icon="hard-drive" href="/formats/raw-efi">
+    Learn about the canonical disk image format
+  </Card>
+  <Card title="Quick Start" icon="rocket" href="/getting-started/quick-start">
+    Build your first stereOS image
+  </Card>
+</CardGroup>

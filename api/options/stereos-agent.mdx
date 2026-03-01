@@ -1,0 +1,215 @@
+---
+title: "stereos.agent Options"
+description: "Agent package configuration options"
+---
+
+The `stereos.agent` options control which packages are available on the agent user's PATH and in gVisor sandbox closures.
+
+## stereos.agent.basePackages
+
+### Declaration
+
+Declared in `modules/users/agent.nix:65`:
+
+```nix
+agent.basePackages = lib.mkOption {
+  type = lib.types.listOf lib.types.package;
+  description = ''
+    Curated set of packages available on the agent's PATH and in the
+    gVisor sandbox closure. Override to add or remove base tools;
+    use stereos.agent.extraPackages for mixtape-specific additions.
+  '';
+  default = with pkgs; [
+    # Core POSIX utilities
+    coreutils gnugrep gnused gawk findutils diffutils less which
+    
+    # Development essentials
+    git curl jq ripgrep tree file unzip gnumake
+    
+    # Editors
+    vim
+    
+    # Terminal multiplexer
+    tmux
+    
+    # Process inspection (safe subset)
+    htop procps  # ps, top, etc.
+    
+    # Networking
+    openssh  # ssh client for agent-to-agent or git-over-ssh
+    cacert   # TLS certificates
+    
+    # Shell
+    bash
+  ];
+};
+```
+
+### Type
+
+```
+list of package
+```
+
+### Default Packages
+
+The default includes:
+
+- **Core POSIX utilities** - coreutils, grep, sed, awk, find, diff, less, which
+- **Development tools** - git, curl, jq, ripgrep, tree, file, unzip, make
+- **Editors** - vim
+- **Terminal** - tmux
+- **Process inspection** - htop, procps (ps, top)
+- **Networking** - openssh (client), cacert (TLS certificates)
+- **Shell** - bash
+
+### Usage: Override Base Packages
+
+To customize the base package set for all agents in a mixtape:
+
+```nix
+{ config, lib, pkgs, ... }:
+
+{
+  stereos.agent.basePackages = config.stereos.agent.basePackages ++ [
+    pkgs.neovim      # Add neovim
+    pkgs.fzf         # Add fuzzy finder
+  ];
+}
+```
+
+Or completely replace the base set:
+
+```nix
+{ pkgs, ... }:
+
+{
+  stereos.agent.basePackages = lib.mkForce [
+    pkgs.bash
+    pkgs.coreutils
+    pkgs.git
+    # Minimal set
+  ];
+}
+```
+
+## stereos.agent.extraPackages
+
+### Declaration
+
+Declared in `modules/users/agent.nix:112`:
+
+```nix
+agent.extraPackages = lib.mkOption {
+  type = lib.types.listOf lib.types.package;
+  default = [];
+  description = ''
+    Additional packages to make available on the agent's PATH.
+    Feature modules (opencode.nix, claude-code.nix, etc.) append to this.
+  '';
+};
+```
+
+### Type
+
+```
+list of package
+```
+
+### Default
+
+```nix
+[]
+```
+
+### Usage: Add Mixtape-Specific Packages
+
+Feature modules typically use `extraPackages` to add tools:
+
+```nix mixtapes/opencode/base.nix
+{ config, lib, pkgs, ... }:
+
+{
+  stereos.agent.extraPackages = [ pkgs.opencode ];
+}
+```
+
+Multiple feature modules can append to the same list:
+
+```nix mixtapes/full/base.nix
+{ config, lib, pkgs, ... }:
+
+{
+  stereos.agent.extraPackages = [
+    pkgs.opencode
+    pkgs.nodePackages."@anthropic-ai/claude-code"
+    # ... more agents
+  ];
+}
+```
+
+## How Packages Are Applied
+
+The agent module builds two environments:
+
+```nix modules/users/agent.nix
+# Base environment
+agentEnv = pkgs.buildEnv {
+  name = "stereos-agent-env";
+  paths = config.stereos.agent.basePackages;
+  pathsToLink = [ "/bin" "/lib" "/share" "/etc" ];
+};
+
+# Extra environment (from feature modules)
+extraEnv = pkgs.buildEnv {
+  name = "stereos-agent-extra-env";
+  paths = config.stereos.agent.extraPackages;
+  pathsToLink = [ "/bin" ];
+};
+```
+
+The agent shell combines both:
+
+```bash
+export PATH="${agentEnv}/bin:${extraEnv}/bin"
+```
+
+## Sandbox Closure
+
+Both `basePackages` and `extraPackages` are included in the gVisor sandbox closure via `mkSandboxManifest`:
+
+```nix lib/default.nix
+allPackages = config.stereos.agent.basePackages
+  ++ config.stereos.agent.extraPackages;
+
+sandboxProfile = pkgs.buildEnv {
+  name = "stereos-sandbox-profile";
+  paths = allPackages;
+};
+```
+
+The closure manifest is written to `/etc/stereos/sandbox-closure.txt` at build time.
+
+## Example: Full Mixtape
+
+The full mixtape includes multiple agent tools:
+
+```nix mixtapes/full/base.nix
+{ config, lib, pkgs, ... }:
+
+{
+  stereos.agent.extraPackages = [
+    pkgs.opencode
+    pkgs.nodePackages."@anthropic-ai/claude-code"
+    pkgs.python3Packages.google-generativeai
+  ];
+}
+```
+
+## Source Reference
+
+Option declarations: `modules/users/agent.nix:65` and `modules/users/agent.nix:112`  
+Used in:
+- `modules/users/agent.nix:21` (basePackages)
+- `modules/users/agent.nix:28` (extraPackages)
+- `lib/default.nix:24` (mkSandboxManifest)

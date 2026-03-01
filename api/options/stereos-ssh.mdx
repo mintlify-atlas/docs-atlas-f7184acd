@@ -1,0 +1,111 @@
+---
+title: "stereos.ssh.authorizedKeys"
+description: "SSH public key authorization for admin and agent users"
+---
+
+The `stereos.ssh.authorizedKeys` option defines SSH public keys that are authorized for both the admin and agent users.
+
+## Declaration
+
+Declared in `modules/users/agent.nix:59`:
+
+```nix
+options.stereos = {
+  ssh.authorizedKeys = lib.mkOption {
+    type = lib.types.listOf lib.types.str;
+    default = [];
+    description = "SSH public keys authorized for both admin and agent users.";
+  };
+};
+```
+
+## Type
+
+```
+list of string
+```
+
+## Default
+
+```nix
+[]
+```
+
+## Usage
+
+### In Development Profile
+
+The dev profile (`profiles/dev.nix`) reads SSH keys from the developer's local filesystem:
+
+```nix profiles/dev.nix
+{ config, lib, pkgs, ... }:
+
+let
+  sshKeyPath = "${builtins.getEnv "HOME"}/.config/stereos/ssh-key.pub";
+  sshKeyExists = builtins.pathExists sshKeyPath;
+  sshKey = if sshKeyExists then builtins.readFile sshKeyPath else "";
+in
+{
+  stereos.ssh.authorizedKeys = lib.optional (sshKey != "") sshKey;
+}
+```
+
+### In Production
+
+Production images have no baked-in SSH keys. Keys are ephemerally injected at VM boot time by stereosd over vsock.
+
+To pre-authorize keys in a custom mixtape:
+
+```nix
+{ config, lib, pkgs, ... }:
+
+{
+  stereos.ssh.authorizedKeys = [
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKey1 admin@example.com"
+    "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCExampleKey2 ops@example.com"
+  ];
+}
+```
+
+### How Keys Are Applied
+
+Both user modules reference this option:
+
+```nix modules/users/agent.nix
+users.users.agent = {
+  # ...
+  openssh.authorizedKeys.keys = config.stereos.ssh.authorizedKeys;
+};
+```
+
+```nix modules/users/admin.nix
+users.users.admin = {
+  # ...
+  openssh.authorizedKeys.keys = config.stereos.ssh.authorizedKeys;
+};
+```
+
+## Security Note
+
+Both admin and agent users share the same authorized keys list. This allows a single SSH key to access either account:
+
+```bash
+# SSH as admin (full access)
+ssh admin@stereos-vm
+
+# SSH as agent (restricted)
+ssh agent@stereos-vm
+```
+
+The privilege separation is enforced by:
+
+1. The agent's restricted shell (no Nix access)
+2. Sudo configuration (agent denied, admin permitted)
+3. Group membership (admin in wheel/admin groups, agent not)
+
+## Source Reference
+
+Option declaration: `modules/users/agent.nix:59`  
+Used in:
+- `modules/users/agent.nix:136`
+- `modules/users/admin.nix:20`

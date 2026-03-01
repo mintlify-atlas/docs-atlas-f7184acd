@@ -1,0 +1,404 @@
+---
+title: Distribution Format
+description: Complete distribution bundle with all formats, checksums, and manifest
+---
+
+The distribution format (mkDist) assembles a **publish-ready bundle** containing all stereOS image formats with compression, checksums, and a build manifest. This is the canonical format for releases and distribution.
+
+## Overview
+
+Defined in `lib/dist.nix`, the distribution bundle includes:
+
+- All image formats (raw, QCOW2, kernel artifacts)
+- Compressed variants (zstd level 19)
+- SHA-256 checksums for all artifacts
+- File sizes for all artifacts
+- `mixtape.toml` manifest with metadata
+
+## Build Commands
+
+<Tabs>
+  <Tab title="Nix">
+    ```bash
+    nix build .#packages.aarch64-linux.<mixtape-name>-dist --impure
+    ```
+    
+    Result symlink: `result/`
+  </Tab>
+  <Tab title="Makefile">
+    ```bash
+    make dist MIXTAPE=<mixtape-name>
+    ```
+    
+    Default mixtape: `opencode-mixtape`
+  </Tab>
+</Tabs>
+
+<Note>
+  Building the distribution requires all format artifacts, so it takes the longest time of any build target.
+</Note>
+
+## Build Attribute Path
+
+The distribution is exposed via the flake packages with a `-dist` suffix:
+
+```nix
+packages.aarch64-linux.<mixtape-name>-dist = 
+  mkDist {
+    name   = "<mixtape-name>";
+    raw    = packages.aarch64-linux.<mixtape-name>;
+    qcow2  = packages.aarch64-linux.<mixtape-name>-qcow2;
+    kernel = packages.aarch64-linux.<mixtape-name>-kernel-artifacts;
+  }
+```
+
+## Distribution Contents
+
+After building, the `result/` directory contains:
+
+```
+result/
+├── stereos.img              # Raw EFI disk image (uncompressed)
+├── stereos.img.zst          # Raw image (zstd compressed)
+├── stereos.qcow2            # QCOW2 disk image (uncompressed)
+├── stereos.qcow2.zst        # QCOW2 image (zstd compressed)
+├── bzImage                  # Compressed kernel image
+├── initrd                   # Initramfs
+├── cmdline                  # Kernel command-line parameters
+├── init                     # NixOS stage-2 init path
+└── mixtape.toml             # Build manifest with checksums
+```
+
+## mkDist Function
+
+From `lib/dist.nix`:
+
+```nix
+mkDist = { pkgs, name, version ? "0.0.0-dev", system ? "aarch64-linux", raw, qcow2, kernel }:
+  pkgs.runCommand "${name}-dist" {
+    inherit version;
+    mixtape = name;
+    arch = system;
+    nativeBuildInputs = [ pkgs.zstd ];
+  } ''
+    mkdir -p $out
+
+    # Copy artifacts
+    cp -L ${raw}/stereos.img      $out/
+    cp -L ${qcow2}/stereos.qcow2  $out/
+    cp -L ${kernel}/bzImage       $out/
+    cp -L ${kernel}/initrd        $out/
+    cp -L ${kernel}/cmdline       $out/
+    cp -L ${kernel}/init          $out/
+
+    # Compress disk images with zstd
+    zstd -19 -T0 $out/stereos.img   -o $out/stereos.img.zst
+    zstd -19 -T0 $out/stereos.qcow2 -o $out/stereos.qcow2.zst
+
+    # Compute checksums and sizes
+    # ... (generates mixtape.toml)
+  '';
+```
+
+## Compression Strategy
+
+The distribution uses **zstd level 19** for maximum compression:
+
+- `-19`: Maximum compression level (slower, best ratio)
+- `-T0`: Use all available CPU threads
+
+Typical compression results:
+
+| File | Original Size | Compressed Size | Ratio |
+|------|---------------|-----------------|-------|
+| `stereos.img` (raw) | 4.8 GB | 1.8 GB | 37% |
+| `stereos.qcow2` | 2.3 GB | 1.6 GB | 70% |
+
+<Note>
+  QCOW2 is already compressed internally, so zstd provides less additional benefit.
+</Note>
+
+## mixtape.toml Manifest
+
+The `mixtape.toml` file contains metadata and checksums for all artifacts:
+
+```toml
+name = "opencode-mixtape"
+version = "0.1.0"
+arch = "aarch64-linux"
+
+[artifacts.raw]
+file = "stereos.img"
+sha256 = "abc123..."
+size = 5150212096
+compressed_file = "stereos.img.zst"
+compressed_sha256 = "def456..."
+compressed_size = 1932735283
+
+[artifacts.qcow2]
+file = "stereos.qcow2"
+sha256 = "ghi789..."
+size = 2473901056
+compressed_file = "stereos.qcow2.zst"
+compressed_sha256 = "jkl012..."
+compressed_size = 1717986918
+
+[artifacts.kernel.bzimage]
+file = "bzImage"
+sha256 = "mno345..."
+size = 18874368
+
+[artifacts.kernel.initrd]
+file = "initrd"
+sha256 = "pqr678..."
+size = 87654321
+
+[artifacts.kernel.cmdline]
+file = "cmdline"
+sha256 = "stu901..."
+size = 256
+
+[artifacts.kernel.init]
+file = "init"
+sha256 = "vwx234..."
+size = 64
+```
+
+## Manifest Structure
+
+The TOML manifest has three sections:
+
+### Top-Level Metadata
+
+- **name**: Mixtape identifier
+- **version**: Semantic version (default: `0.0.0-dev`)
+- **arch**: Target architecture (always `aarch64-linux`)
+
+### artifacts.raw
+
+Raw EFI disk image metadata:
+
+- **file**: Uncompressed filename
+- **sha256**: SHA-256 checksum of uncompressed file
+- **size**: Uncompressed file size in bytes
+- **compressed_file**: Zstd-compressed filename
+- **compressed_sha256**: SHA-256 checksum of compressed file
+- **compressed_size**: Compressed file size in bytes
+
+### artifacts.qcow2
+
+QCOW2 disk image metadata (same structure as raw).
+
+### artifacts.kernel
+
+Kernel artifacts metadata:
+
+- **artifacts.kernel.bzimage**: Kernel image
+- **artifacts.kernel.initrd**: Initramfs
+- **artifacts.kernel.cmdline**: Kernel command line
+- **artifacts.kernel.init**: Stage-2 init path
+
+Each artifact has:
+- **file**: Filename
+- **sha256**: SHA-256 checksum
+- **size**: File size in bytes
+
+## Version Management
+
+Set the version when building:
+
+```nix
+mkDist {
+  name = "opencode-mixtape";
+  version = "0.2.1";
+  # ...
+}
+```
+
+The version appears in the manifest and can be used by downstream tools for version tracking.
+
+## Use Cases
+
+### Release Publishing
+
+Build and publish a release:
+
+```bash
+# Build distribution
+make dist MIXTAPE=opencode-mixtape
+
+# Upload to release hosting
+aws s3 sync result/ s3://releases.stereos.dev/opencode-mixtape/v0.2.1/
+```
+
+### CI/CD Integration
+
+Use the manifest in CI pipelines:
+
+```bash
+# Verify checksums
+sha256sum -c <(grep 'sha256 =' result/mixtape.toml | cut -d'"' -f2)
+
+# Extract metadata
+grep 'version =' result/mixtape.toml
+```
+
+### Download and Verification
+
+Users can verify downloads using the manifest:
+
+```bash
+# Download compressed image
+curl -LO https://releases.stereos.dev/opencode-mixtape/v0.2.1/stereos.img.zst
+
+# Verify checksum
+sha256sum stereos.img.zst
+# Compare with mixtape.toml compressed_sha256
+
+# Decompress
+zstd -d stereos.img.zst
+
+# Verify decompressed checksum
+sha256sum stereos.img
+# Compare with mixtape.toml sha256
+```
+
+### Dagger Integration
+
+The distribution format is designed for Dagger CI:
+
+```go
+// Load manifest
+manifest := dag.Host().File("result/mixtape.toml")
+
+// Verify artifact
+artifact := dag.Host().File("result/stereos.img")
+checksum := dag.Container().
+    From("alpine:latest").
+    WithFile("/artifact", artifact).
+    WithExec([]string{"sha256sum", "/artifact"}).
+    Stdout(ctx)
+
+// Compare with manifest
+// ...
+```
+
+## Distribution Size
+
+Typical distribution sizes:
+
+| Mixtape | Total Uncompressed | Total Compressed | Recommended Download |
+|---------|-------------------|------------------|----------------------|
+| Minimal | 3.2 GB | 2.1 GB | `stereos.img.zst` (900 MB) |
+| OpenCode | 6.1 GB | 3.4 GB | `stereos.img.zst` (1.8 GB) |
+| Full | 9.5 GB | 5.2 GB | `stereos.img.zst` (2.9 GB) |
+
+Users should download the compressed raw image (`stereos.img.zst`) for the best balance of size and compatibility.
+
+## Checksum Verification
+
+The manifest includes checksums computed at build time, so downstream tools never need to re-hash multi-GB files:
+
+```bash
+# Extract expected checksum from manifest
+expected=$(grep -A 1 '\[artifacts.raw\]' result/mixtape.toml | grep sha256 | cut -d'"' -f2)
+
+# Verify artifact (instant - checksum was computed at build time)
+actual=$(sha256sum result/stereos.img | cut -d' ' -f1)
+
+if [ "$expected" = "$actual" ]; then
+  echo "Checksum verified"
+else
+  echo "Checksum mismatch!"
+  exit 1
+fi
+```
+
+## Artifact Selection
+
+Users can choose which artifact to download based on their needs:
+
+| Artifact | Use Case | Size | Decompression |
+|----------|----------|------|---------------|
+| `stereos.img.zst` | Apple VZ, OCI base | Smallest | Required |
+| `stereos.qcow2.zst` | QEMU/KVM | Small | Required |
+| `stereos.qcow2` | QEMU/KVM (ready-to-use) | Medium | Not required |
+| `bzImage + initrd + cmdline` | Direct kernel boot | Smallest | Not required |
+
+## Decompression
+
+Decompress zstd files:
+
+```bash
+# Decompress raw image
+zstd -d result/stereos.img.zst -o stereos.img
+
+# Decompress QCOW2 image
+zstd -d result/stereos.qcow2.zst -o stereos.qcow2
+
+# Decompress and pipe to stdout
+zstd -dc result/stereos.img.zst | qemu-img convert -f raw -O qcow2 - stereos.qcow2
+```
+
+## Related Formats
+
+<CardGroup cols={3}>
+  <Card title="Raw EFI" icon="hard-drive" href="/formats/raw-efi">
+    Source raw disk image
+  </Card>
+  <Card title="QCOW2" icon="box" href="/formats/qcow2">
+    Source QCOW2 image
+  </Card>
+  <Card title="Kernel Artifacts" icon="rocket" href="/formats/kernel-artifacts">
+    Source kernel boot files
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+### Build fails with zstd error
+
+Ensure zstd is available:
+
+```bash
+nix-shell -p zstd --run "zstd --version"
+```
+
+If zstd is missing, the build will fail during compression.
+
+### Checksum mismatch
+
+If checksums don't match, the build may have been corrupted. Rebuild:
+
+```bash
+nix build .#packages.aarch64-linux.<mixtape-name>-dist --impure --rebuild
+```
+
+### Missing artifacts in result
+
+Ensure all format builds succeeded:
+
+```bash
+nix build .#packages.aarch64-linux.<mixtape-name> --impure
+nix build .#packages.aarch64-linux.<mixtape-name>-qcow2 --impure
+nix build .#packages.aarch64-linux.<mixtape-name>-kernel-artifacts --impure
+```
+
+Then rebuild the distribution:
+
+```bash
+make dist MIXTAPE=<mixtape-name>
+```
+
+### mixtape.toml parsing errors
+
+The manifest is generated at build time using shell string interpolation. If parsing fails, check for:
+
+- Special characters in mixtape name or version
+- Invalid TOML syntax in generated file
+
+Verify the manifest:
+
+```bash
+python3 -c "import tomllib; print(tomllib.load(open('result/mixtape.toml', 'rb')))"
+```

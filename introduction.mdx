@@ -1,0 +1,116 @@
+---
+title: Introduction to stereOS
+description: A Linux-based operating system hardened and purpose-built for AI agents
+---
+
+# Introduction to stereOS
+
+stereOS is a Linux-based operating system hardened and purpose-built for AI agents. Built on NixOS, it provides a minimal, secure environment where AI agents can operate safely with proper isolation and control.
+
+## What is stereOS?
+
+stereOS produces machine images called **mixtapes** that bundle a hardened, minimal Linux system with specific AI agent harnesses. Each mixtape is optimized for running AI coding agents in a secure, isolated environment.
+
+<CardGroup cols={2}>
+  <Card title="Hardened by design" icon="shield">
+    Built with security first: restricted user permissions, kernel hardening, process isolation, and ephemeral temporary storage
+  </Card>
+  
+  <Card title="Sub-3 second boot" icon="bolt">
+    Optimized boot configuration with direct kernel boot support bypasses UEFI/GRUB for lightning-fast startup
+  </Card>
+  
+  <Card title="Multiple agent support" icon="robot">
+    Ships with pre-configured mixtapes for OpenCode, Claude Code, Gemini CLI, or run them all together
+  </Card>
+  
+  <Card title="Declarative configuration" icon="code">
+    Built with Nix for reproducible, declarative system configuration and dependency management
+  </Card>
+</CardGroup>
+
+## System architecture
+
+stereOS implements a minimal architecture with clear separation between administrative and agent operations:
+
+- **admin user** - Administrative operations with full system access at `/home/admin`
+- **agent user** - Restricted environment for AI agents at `/home/agent/workspace`
+- **stereosd** - stereOS system daemon providing control plane operations
+- **agentd** - Agent management daemon handling agent lifecycle
+
+<Note>
+The agent user is explicitly denied access to the Nix daemon and package management tools, preventing unauthorized system modifications.
+</Note>
+
+## Available mixtapes
+
+stereOS currently provides the following pre-configured mixtapes:
+
+| Mixtape | Agent binary | Required API key |
+|---------|--------------|------------------|
+| `opencode-mixtape` | `opencode` | `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` |
+| `claude-code-mixtape` | `claude-code` | `ANTHROPIC_API_KEY` |
+| `gemini-cli-mixtape` | `gemini-cli` | `GOOGLE_API_KEY` |
+| `full-mixtape` | All agents | Respective API keys |
+
+<Note>
+Each mixtape comes in two variants: production (secure, no SSH keys) and `-dev` (includes SSH key injection for local development).
+</Note>
+
+## Image formats
+
+stereOS builds multiple image formats to support different virtualization platforms:
+
+| Format | Output file | Use case |
+|--------|-------------|----------|
+| Raw EFI | `stereos.img` | Canonical artifact, Apple Virtualization Framework bootable |
+| QCOW2 | `stereos.qcow2` | QEMU/KVM virtualization |
+| Kernel artifacts | `bzImage`, `initrd`, `cmdline` | Direct-kernel boot (bypasses UEFI/GRUB) |
+
+## Key features
+
+### Security hardening
+
+stereOS implements multiple layers of security:
+
+- Restricted `agent` user with minimal permissions
+- Kernel hardening via sysctl configurations
+- Process tracing restrictions (ptrace scope = 2)
+- Ephemeral `/tmp` using tmpfs (never written to disk)
+- SSH key injection via vsock (no baked-in credentials)
+- Firewall allowing only SSH traffic
+
+### Minimal footprint
+
+The system includes only essential packages:
+
+```nix
+environment.systemPackages = with pkgs; [
+  git vim curl jq ripgrep
+  htop tmux tree file unzip
+  gvisor  # For sandboxed agent execution
+];
+```
+
+### Reproducible builds
+
+Built entirely with Nix, every build is:
+
+- Deterministic and reproducible
+- Declaratively configured
+- Version-controlled
+- Easily customizable via the flake system
+
+## Getting started
+
+Ready to run stereOS? Check out the [quickstart guide](/quickstart) to get a VM running in minutes, or see the [installation guide](/installation) for detailed setup instructions.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get a stereOS VM running in 5 minutes
+  </Card>
+  
+  <Card title="Installation" icon="download" href="/installation">
+    Detailed installation and configuration guide
+  </Card>
+</CardGroup>

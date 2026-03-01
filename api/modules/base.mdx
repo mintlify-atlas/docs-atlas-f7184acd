@@ -1,0 +1,168 @@
+---
+title: "Base Module"
+description: "Core stereOS system configuration"
+---
+
+The base module (`modules/base.nix`) provides the foundational stereOS system configuration:
+
+- Filesystem layout and auto-resize
+- SSH server configuration
+- User authentication policy
+- Nix daemon settings and access control
+- System packages
+- Kernel hardening and security settings
+
+## System Identity
+
+stereOS overrides `/etc/os-release` to identify itself:
+
+```nix
+environment.etc."os-release".text = lib.mkForce ''
+  NAME="stereOS"
+  ID=stereos
+  ID_LIKE=nixos
+  VERSION="${config.system.nixos.version}"
+  PRETTY_NAME="stereOS (${config.networking.hostName})"
+  HOME_URL="https://github.com/paper-compute-co"
+'';
+```
+
+## ASCII Art MOTD
+
+The base module configures a stereOS ASCII art banner displayed on SSH login:
+
+```
+______   ______  ______   ______   ______   ______   ______
+/\  ___\ /\__  _\/\  ___\ /\  == \ /\  ___\ /\  __ \ /\  ___\
+\ \___  \\/_/\ \/\ \  __\ \ \  __< \ \  __\ \ \ \/\ \\ \___  \
+ \/\_____\  \ \_\ \ \_____\\ \_\ \_\\ \_____\\ \_____\\/\_____\
+  \/_____/   \/_/  \/_____/ \/_/ /_/ \/_____/ \/_____/ \/_____/
+
+  Mixtape: opencode-mixtape
+```
+
+## Filesystem Configuration
+
+Root filesystem auto-resizes on first boot:
+
+```nix
+fileSystems."/" = {
+  device = "/dev/disk/by-label/nixos";
+  fsType = "ext4";
+  autoResize = true;  # Grow root partition on first boot
+};
+```
+
+## SSH Server
+
+SSH is enabled with security-focused defaults:
+
+```nix
+services.openssh = {
+  enable = true;
+  settings = {
+    PasswordAuthentication = false;
+    PermitRootLogin = "no";
+    KbdInteractiveAuthentication = false;
+  };
+};
+```
+
+SSH keys are ephemerally injected at VM boot time by stereosd over vsock - no keys are baked into the image.
+
+## Nix Daemon Access Control
+
+The base module implements the primary security boundary preventing the agent from using Nix tooling:
+
+```nix
+nix.settings = {
+  experimental-features = [ "nix-command" "flakes" ];
+  auto-optimise-store = true;
+  
+  # CRITICAL: Only root and wheel can talk to the Nix daemon.
+  # The 'agent' user is explicitly excluded.
+  allowed-users = [ "root" "@wheel" ];
+  trusted-users = [ "root" ];
+};
+```
+
+## System Packages
+
+Core utilities available system-wide:
+
+```nix
+environment.systemPackages = with pkgs; [
+  git
+  vim
+  curl
+  jq
+  ripgrep
+  htop
+  tmux
+  tree
+  file
+  unzip
+  ghostty.terminfo  # xterm-ghostty terminfo entry
+  gvisor            # runsc: gVisor sandbox runtime
+];
+```
+
+## Firewall
+
+Firewall allows SSH only:
+
+```nix
+networking.firewall = {
+  enable = true;
+  allowedTCPPorts = [ 22 ];  # SSH only
+};
+```
+
+<Note>
+  In boot.nix, the firewall is disabled for the agent sandbox image since isolation is enforced at the VM boundary.
+</Note>
+
+## Kernel Hardening
+
+The base module applies security-focused kernel parameters:
+
+```nix
+boot.kernel.sysctl = {
+  # Restrict process tracing (blocks ptrace-based attacks)
+  "kernel.yama.ptrace_scope" = 2;
+  
+  # Hide kernel pointers from non-root
+  "kernel.kptr_restrict" = 2;
+  
+  # Restrict dmesg to root
+  "kernel.dmesg_restrict" = 1;
+  
+  # Disable core dumps via pipe
+  "kernel.core_pattern" = "|/bin/false";
+  
+  # Network hardening
+  "net.ipv4.conf.all.accept_redirects" = 0;
+  "net.ipv4.conf.default.accept_redirects" = 0;
+  "net.ipv6.conf.all.accept_redirects" = 0;
+  "net.ipv4.conf.all.send_redirects" = 0;
+};
+```
+
+## Ephemeral /tmp
+
+`/tmp` is mounted as tmpfs (in-memory, never written to disk):
+
+```nix
+boot.tmp.useTmpfs = true;
+```
+
+## Locale and Timezone
+
+```nix
+time.timeZone = "UTC";
+i18n.defaultLocale = "en_US.UTF-8";
+```
+
+## Source Reference
+
+View the complete module source: `modules/base.nix:1`

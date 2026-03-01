@@ -1,0 +1,695 @@
+---
+title: System Components
+description: Deep dive into stereOS core components - stereosd, agentd, and users
+---
+
+# System Components
+
+stereOS consists of four primary components that work together to provide a secure, isolated environment for AI agents. This page provides detailed documentation for each component.
+
+## Component Overview
+
+```
+┌─────────────────────────────────────────────────────┐
+│                 stereOS System                       │
+│                                                      │
+│  ┌────────────────────────────────────────────┐    │
+│  │         System Services                    │    │
+│  │  ┌──────────────┐    ┌──────────────┐     │    │
+│  │  │  stereosd    │───►│   agentd     │     │    │
+│  │  │  (root)      │    │   (root)     │     │    │
+│  │  └──────┬───────┘    └──────┬───────┘     │    │
+│  └─────────┼───────────────────┼──────────────┘    │
+│            │                    │                   │
+│            │ control            │ manages           │
+│            │                    ▼                   │
+│  ┌─────────▼──────────────────────────────────┐    │
+│  │         User Space                         │    │
+│  │  ┌──────────────┐    ┌──────────────┐     │    │
+│  │  │ admin user   │    │ agent user   │     │    │
+│  │  │ (privileged) │    │ (restricted) │     │    │
+│  │  └──────────────┘    └──────────────┘     │    │
+│  └────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────┘
+```
+
+## stereosd - System Daemon
+
+stereosd is the lifecycle and control plane daemon that manages VM initialization, host-guest communication, and graceful shutdown.
+
+### Responsibilities
+
+- **Host-guest communication** via virtio-vsock (CID:3, port 1024) or TCP fallback
+- **Secret injection** to `/run/stereos/secrets/`
+- **Shared directory mounting** (virtio-fs, 9p)
+- **SSH key injection** for ephemeral access
+- **Environment variable injection** for agent configuration
+- **Graceful shutdown coordination** on host request
+
+### Service Configuration
+
+From `~/workspace/source/modules/services/stereosd.nix:25-66`:
+```nix
+config = {
+  # Enable the stereosd service from the external flake module.
+  services.stereosd.enable = true;
+
+  # Runtime directories (tmpfs-backed)
+  systemd.tmpfiles.rules = [
+    "d /run/stereos 0750 root admin -"
+    "d /run/stereos/secrets 0700 root root -"
+  ];
+
+  # Firewall: allow TCP 1024 for control plane TCP fallback
+  networking.firewall.allowedTCPPorts = [ 1024 ];
+
+  systemd.services.stereosd = {
+    # mount and umount are needed for shared directory mounting
+    path = [ pkgs.util-linux pkgs.coreutils ];
+
+    # Ensure kernel modules are loaded before stereosd starts
+    after = [ "systemd-modules-load.service" ];
+
+    serviceConfig = {
+      # stereosd runs as root because it must:
+      #   - Bind to AF_VSOCK sockets
+      #   - Mount/unmount shared filesystems (CAP_SYS_ADMIN)
+      #   - Write secrets to /run/stereos/secrets (root-owned)
+      #   - Initiate system poweroff during shutdown
+      DynamicUser = lib.mkForce false;
+
+      Restart = lib.mkForce "on-failure";
+      RestartSec = 5;
+    };
+  };
+};
+```
+
+### Runtime Directories
+
+| Directory | Permissions | Owner | Purpose |
+|-----------|-------------|-------|----------|
+| `/run/stereos/` | `0750` | `root:admin` | Daemon sockets, runtime state |
+| `/run/stereos/secrets/` | `0700` | `root:root` | Injected secrets (API keys, tokens) |
+
+<Info>
+The `admin` group can access `/run/stereos/` to interact with daemon sockets, but CANNOT read secrets. Only root has secret access.
+</Info>
+
+### Communication Protocols
+
+#### virtio-vsock (Primary)
+
+stereOS prefers AF_VSOCK for host-guest communication:
+
+- **Address**: CID:3 (guest), port 1024
+- **Transport**: Kernel modules `vmw_vsock_virtio_transport`
+- **Supported by**: QEMU/KVM, Firecracker, Cloud Hypervisor
+- **Advantages**: Fast, no network stack overhead, cannot be intercepted by guest network
+
+From `~/workspace/source/modules/boot.nix:85-88`:
+```nix
+# Force-load vsock transport so it's available before stereosd starts
+boot.kernelModules = [ "vmw_vsock_virtio_transport" ];
+```
+
+From `~/workspace/source/modules/services/stereosd.nix:49-53`:
+```nix
+# Ensure kernel modules are loaded before stereosd starts
+after = [ "systemd-modules-load.service" ];
+```
+
+#### TCP Fallback
+
+When vsock is unavailable (e.g., macOS + QEMU user-mode networking):
+
+- **Address**: `0.0.0.0:1024` (listens on all interfaces)
+- **Host access**: via SLIRP port forwarding (`hostfwd=tcp::1024-:1024`)
+- **Security**: Less secure than vsock (visible to guest network stack)
+
+<Warning>
+TCP fallback should only be used for development. Production deployments should use vsock for better security and performance.
+</Warning>
+
+### Shared Directory Mounting
+
+stereosd mounts host directories into the guest:
+
+```toml
+# Example jcard.toml
+[[shared]]
+guest = "/home/agent/workspace"
+host = "./workspace"
+readonly = false
+```
+
+Supported filesystems:
+- **virtio-fs** - Modern, high-performance shared filesystem (QEMU 5.0+)
+- **9p** - POSIX filesystem protocol over virtio (legacy, widely supported)
+
+From `~/workspace/source/modules/services/stereosd.nix:46-47`:
+```nix
+# mount and umount are needed for shared directory mounting
+path = [ pkgs.util-linux pkgs.coreutils ];
+```
+
+### Secret Injection
+
+Secrets are written to `/run/stereos/secrets/` as individual files:
+
+```bash
+/run/stereos/secrets/
+├── anthropic_api_key    # 0600 root:root
+├── openai_api_key       # 0600 root:root
+└── github_token         # 0600 root:root
+```
+
+Agents read secrets via environment variables or direct file access (if running as root via agentd).
+
+## agentd - Agent Management Daemon
+
+agentd manages the lifecycle of AI agent processes, providing both native (tmux) and sandboxed (gVisor) execution modes.
+
+### Responsibilities
+
+- **Agent process lifecycle** (start, stop, restart)
+- **Execution modes**: tmux sessions (native) or gVisor containers (sandboxed)
+- **Process supervision** with automatic restart on failure
+- **Admin introspection** via tmux attach or runsc exec
+- **Resource management** via systemd cgroups or gVisor limits
+- **Dependency on stereosd** for secrets and control plane
+
+### Service Configuration
+
+From `~/workspace/source/modules/services/agentd.nix:24-60`:
+```nix
+config = {
+  # Enable the agentd service from the external flake module.
+  services.agentd.enable = true;
+
+  # Runtime directories
+  systemd.tmpfiles.rules = [
+    "d /run/agentd 0750 agent admin -"
+    "d /run/agentd/sandboxes 0750 root admin -"       # OCI bundles
+    "d /run/agentd/runsc-state 0750 root admin -"     # runsc state
+  ];
+
+  systemd.services.agentd = {
+    # agentd starts AFTER stereosd
+    after = [ "stereosd.service" ];
+    requires = [ "stereosd.service" ];
+
+    # Add gVisor and nix to PATH
+    path = [ pkgs.gvisor pkgs.nix ];
+
+    serviceConfig = {
+      # agentd runs as root to manage tmux sessions and runsc containers
+      DynamicUser = lib.mkForce false;
+
+      Restart = lib.mkForce "on-failure";
+      RestartSec = 5;
+    };
+  };
+};
+```
+
+### Runtime Directories
+
+| Directory | Permissions | Owner | Purpose |
+|-----------|-------------|-------|----------|
+| `/run/agentd/` | `0750` | `agent:admin` | tmux socket for native mode |
+| `/run/agentd/sandboxes/` | `0750` | `root:admin` | OCI bundle directories for gVisor |
+| `/run/agentd/runsc-state/` | `0750` | `root:admin` | runsc container state files |
+
+### Execution Modes
+
+#### Native Mode (tmux)
+
+Agent runs directly as the `agent` user inside a tmux session:
+
+**Advantages:**
+- Low overhead
+- Easy debugging (`tmux attach`)
+- Direct access to shell history
+
+**Security:**
+- User-level isolation only
+- Relies on restricted shell and Nix daemon denial
+- No syscall filtering
+
+**Admin introspection:**
+```bash
+sudo tmux -S /run/agentd/agentd-tmux.sock attach
+```
+
+#### Sandboxed Mode (gVisor)
+
+Agent runs inside a gVisor (`runsc`) container:
+
+**Advantages:**
+- Syscall-level isolation
+- Additional attack surface reduction
+- Resource limits enforced by gVisor
+
+**Security:**
+- User-level isolation + syscall filtering
+- gVisor's user-space kernel intercepts all syscalls
+- Separate mount and network namespaces
+
+**Admin introspection:**
+```bash
+sudo runsc --root /run/agentd/runsc-state ps <container-id>
+sudo runsc --root /run/agentd/runsc-state exec <container-id> /bin/bash
+```
+
+<Note>
+Both modes enforce the same Nix daemon restrictions. gVisor adds an additional syscall-level isolation layer on top of the base user isolation.
+</Note>
+
+### Sandbox Closure Manifest
+
+agentd uses a pre-computed Nix store closure manifest to avoid runtime `nix-store -qR` calls:
+
+From `~/workspace/source/lib/default.nix:19-43`:
+```nix
+mkSandboxManifest = { }:
+  { config, lib, pkgs, ... }:
+  let
+    # Combine base + extra packages
+    allPackages = config.stereos.agent.basePackages
+      ++ config.stereos.agent.extraPackages;
+
+    # Build environment from all packages
+    sandboxProfile = pkgs.buildEnv {
+      name = "stereos-sandbox-profile";
+      paths = allPackages;
+    };
+
+    # Compute full /nix/store closure at build time
+    closureManifest = pkgs.closureInfo { rootPaths = [ sandboxProfile ]; };
+  in
+  {
+    # Install manifest for agentd to read
+    environment.etc."stereos/sandbox-closure.txt" = {
+      source = "${closureManifest}/store-paths";
+      mode = "0444";
+    };
+  };
+```
+
+This manifest at `/etc/stereos/sandbox-closure.txt` lists all `/nix/store` paths needed for the sandbox, allowing agentd to quickly bind-mount them without invoking Nix.
+
+### Dependencies
+
+agentd requires stereosd to be running:
+
+From `~/workspace/source/modules/services/agentd.nix:40-43`:
+```nix
+after = [ "stereosd.service" ];
+requires = [ "stereosd.service" ];
+```
+
+This ensures:
+- Secrets are available before agent starts
+- Unix socket `/run/stereos/stereosd.sock` exists
+- Shared directories are mounted
+
+## User Model
+
+stereOS implements a two-tier user model for privilege separation.
+
+### Admin User
+
+The privileged user for system administration.
+
+#### Configuration
+
+From `~/workspace/source/modules/users/admin.nix:12-28`:
+```nix
+config = {
+  # Admin group
+  users.groups.admin = {};
+
+  # Admin user (full access)
+  users.users.admin = {
+    isNormalUser = true;
+    extraGroups = [ "wheel" "admin" ];
+    openssh.authorizedKeys.keys = config.stereos.ssh.authorizedKeys;
+  };
+
+  # Sudo configuration
+  security.sudo = {
+    enable = true;
+    wheelNeedsPassword = false;  # Passwordless sudo
+  };
+};
+```
+
+#### Capabilities
+
+- ✅ Full sudo access (passwordless)
+- ✅ Access to all daemon sockets (`/run/stereos/`, `/run/agentd/`)
+- ✅ Can use Nix tooling (member of `@wheel`)
+- ✅ Can attach to agent tmux sessions
+- ✅ Can exec into gVisor sandboxes
+- ✅ SSH access with authorized keys
+- ❌ Cannot read secrets in `/run/stereos/secrets/` (only root can)
+
+#### Use Cases
+
+- Debugging agent behavior
+- Inspecting system state
+- Managing services
+- Accessing logs via journalctl
+
+### Agent User
+
+The restricted user that AI agents run as.
+
+#### Configuration
+
+From `~/workspace/source/modules/users/agent.nix:122-156`:
+```nix
+config = {
+  # Register restricted shell
+  environment.shells = [ "${agentShell}/bin/stereos-agent-shell" ];
+
+  # Agent group and user
+  users.groups.agent = {};
+
+  users.users.agent = {
+    isNormalUser = true;
+    group = "agent";
+    home = "/home/agent";
+    shell = "${agentShell}/bin/stereos-agent-shell";
+    extraGroups = [];
+    openssh.authorizedKeys.keys = config.stereos.ssh.authorizedKeys;
+  };
+
+  # Workspace directory
+  systemd.tmpfiles.rules = [
+    "d /home/agent/workspace 0755 agent agent -"
+  ];
+
+  # Explicit sudo denial
+  security.sudo = {
+    enable = true;
+    extraConfig = ''
+      agent ALL=(ALL:ALL) !ALL
+    '';
+  };
+};
+```
+
+#### Capabilities
+
+- ✅ Read access to `/nix/store` (all packages)
+- ✅ Write access to `/home/agent/workspace` and `/tmp`
+- ✅ Execute curated binaries in PATH (base + extra packages)
+- ✅ SSH access (dev images only, production uses stereosd key injection)
+- ❌ No sudo access (explicitly denied)
+- ❌ No Nix daemon access
+- ❌ No access to daemon sockets outside `/run/agentd/`
+- ❌ No wheel group membership
+
+#### Restricted Shell
+
+The agent's shell implements multiple restrictions:
+
+From `~/workspace/source/modules/users/agent.nix:34-53`:
+```nix
+agentShell = pkgs.writeShellScriptBin "stereos-agent-shell" ''
+  # Set PATH to only approved binaries + feature tool binaries
+  export PATH="${agentEnv}/bin:${extraEnv}/bin"
+
+  # Ensure TLS certificates work
+  export SSL_CERT_FILE="${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+  export NIX_SSL_CERT_FILE="$SSL_CERT_FILE"
+
+  # Nuke all Nix-related environment variables
+  unset NIX_PATH NIX_REMOTE NIX_CONF_DIR NIX_USER_CONF_FILES
+  unset NIX_PROFILES NIX_STORE
+
+  # Default working directory to ~/workspace
+  if [ -d "$HOME/workspace" ]; then
+    cd "$HOME/workspace"
+  fi
+
+  # Exec into a clean bash session
+  exec ${pkgs.bash}/bin/bash --login "$@"
+'';
+```
+
+**Key restrictions:**
+
+1. **PATH override** - Only approved binaries are accessible
+2. **Nix variable removal** - Prevents Nix daemon discovery
+3. **Clean environment** - No inherited variables that could leak system info
+4. **Workspace default** - Agent starts in `/home/agent/workspace`
+
+#### Package Sets
+
+**Base Packages** (`stereos.agent.basePackages`):
+
+From `~/workspace/source/modules/users/agent.nix:72-109`:
+```nix
+default = with pkgs; [
+  # Core POSIX utilities
+  coreutils gnugrep gnused gawk findutils diffutils less which
+
+  # Development essentials
+  git curl jq ripgrep tree file unzip gnumake
+
+  # Editors
+  vim
+
+  # Terminal multiplexer
+  tmux
+
+  # Process inspection (safe subset)
+  htop procps  # ps, top, etc.
+
+  # Networking
+  openssh cacert
+
+  # Shell
+  bash
+];
+```
+
+**Extra Packages** (`stereos.agent.extraPackages`):
+
+- Mixtape-specific tools (opencode, claude-code, etc.)
+- Language runtimes (python, node, go) if added by mixtape
+- Custom packages defined in feature modules
+
+From `~/workspace/source/modules/users/agent.nix:112-119`:
+```nix
+agent.extraPackages = lib.mkOption {
+  type = lib.types.listOf lib.types.package;
+  default = [];
+  description = ''
+    Additional packages to make available on the agent's PATH.
+    Feature modules (opencode.nix, claude-code.nix, etc.) append to this.
+  '';
+};
+```
+
+#### Workspace Directory
+
+The agent's primary working directory:
+
+```
+/home/agent/workspace/
+```
+
+- Created at boot via systemd-tmpfiles
+- Owned by `agent:agent`, mode `0755`
+- Can be a host-shared directory (virtiofs/9p) or ephemeral storage
+- Agent has full read/write access
+
+From `~/workspace/source/modules/users/agent.nix:7-12`:
+```nix
+# Filesystem layout:
+#   /home/agent           — agent's home directory (standard XDG base)
+#   /home/agent/workspace — agent's working directory (owned by agent, writable)
+#   /tmp, /run            — tmpfs (ephemeral, never persisted to disk)
+```
+
+## Privilege Hierarchy
+
+The stereOS privilege model follows a strict hierarchy:
+
+```
+┌─────────────────────────────────────────┐
+│  root                                   │  ← Full system access
+│  - Can do anything                      │     Runs: stereosd, agentd
+│  - Reads secrets                        │
+└─────────────────┬───────────────────────┘
+                  │
+┌─────────────────▼───────────────────────┐
+│  admin (wheel, admin groups)            │  ← Administrative access
+│  - Passwordless sudo                    │     Human operator
+│  - Access to daemon sockets             │
+│  - Can use Nix tooling                  │
+│  - CANNOT read secrets                  │
+└─────────────────┬───────────────────────┘
+                  │
+┌─────────────────▼───────────────────────┐
+│  agent (agent group)                    │  ← Restricted execution
+│  - Curated PATH only                    │     AI agent runs here
+│  - No sudo                              │
+│  - No Nix daemon access                 │
+│  - Limited filesystem access            │
+└─────────────────────────────────────────┘
+```
+
+<Warning>
+The admin user has sudo access but CANNOT read secrets in `/run/stereos/secrets/`. Only root (and processes running as root) can access secrets.
+</Warning>
+
+## Service Dependencies
+
+The stereOS services have explicit ordering:
+
+```
+systemd-modules-load.service
+          │
+          ▼
+   stereosd.service (root)
+          │
+          │ after + requires
+          ▼
+    agentd.service (root)
+          │
+          │ manages
+          ▼
+    agent process (agent user)
+```
+
+From `~/workspace/source/modules/services/agentd.nix:40-43`:
+```nix
+after = [ "stereosd.service" ];
+requires = [ "stereosd.service" ];
+```
+
+This ensures:
+1. Kernel modules (vsock) load first
+2. stereosd initializes control plane, mounts shares, injects secrets
+3. agentd starts only after stereosd is ready
+4. Agent process has access to all runtime dependencies
+
+## Options and Configuration
+
+stereOS exposes two custom NixOS options:
+
+### stereos.ssh.authorizedKeys
+
+From `~/workspace/source/modules/users/agent.nix:59-63`:
+```nix
+stereos.ssh.authorizedKeys = lib.mkOption {
+  type = lib.types.listOf lib.types.str;
+  default = [];
+  description = "SSH public keys authorized for both admin and agent users.";
+};
+```
+
+**Usage:**
+```nix
+# In a mixtape module
+stereos.ssh.authorizedKeys = [
+  "ssh-ed25519 AAAAC3... user@host"
+];
+```
+
+<Note>
+This option is typically used in `profiles/dev.nix` for development. Production images should NOT include baked-in SSH keys.
+</Note>
+
+### stereos.agent.extraPackages
+
+From `~/workspace/source/modules/users/agent.nix:112-119`:
+```nix
+agent.extraPackages = lib.mkOption {
+  type = lib.types.listOf lib.types.package;
+  default = [];
+  description = ''
+    Additional packages to make available on the agent's PATH.
+    Feature modules (opencode.nix, claude-code.nix, etc.) append to this.
+  '';
+};
+```
+
+**Usage:**
+```nix
+# In a mixtape feature module
+stereos.agent.extraPackages = [ pkgs.opencode ];
+```
+
+This is how mixtapes add their agent binaries to the restricted PATH.
+
+## Debugging and Introspection
+
+### Checking Service Status
+
+```bash
+sudo systemctl status stereosd
+sudo systemctl status agentd
+```
+
+### Viewing Logs
+
+```bash
+sudo journalctl -u stereosd -f
+sudo journalctl -u agentd -f
+```
+
+### Inspecting Agent Processes
+
+**Native mode:**
+```bash
+# List tmux sessions
+sudo tmux -S /run/agentd/agentd-tmux.sock list-sessions
+
+# Attach to agent session
+sudo tmux -S /run/agentd/agentd-tmux.sock attach
+```
+
+**Sandboxed mode:**
+```bash
+# List containers
+sudo runsc --root /run/agentd/runsc-state list
+
+# View processes in container
+sudo runsc --root /run/agentd/runsc-state ps <container-id>
+
+# Exec into container
+sudo runsc --root /run/agentd/runsc-state exec <container-id> /bin/bash
+```
+
+### Checking Vsock Availability
+
+```bash
+# Check if vsock modules are loaded
+lsmod | grep vsock
+
+# Should show:
+# vmw_vsock_virtio_transport
+# vmw_vsock_virtio_transport_common
+# vsock
+```
+
+### Verifying Secrets
+
+```bash
+# As root only
+sudo ls -la /run/stereos/secrets/
+
+# Files should be 0600 root:root
+```
+
+## Next Steps
+
+- Learn about the [Security Model](/concepts/security) for detailed isolation mechanisms
+- Explore [Mixtapes](/concepts/mixtapes) to understand package management
+- Review the [Architecture](/concepts/architecture) for the big picture

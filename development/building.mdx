@@ -1,0 +1,307 @@
+---
+title: Building stereOS Images
+description: Build stereOS images from source using Nix
+---
+
+stereOS uses Nix flakes to build reproducible system images. The build system supports multiple image formats and mixtape configurations.
+
+## Prerequisites
+
+Before building stereOS, ensure you have:
+
+- Nix with flakes enabled
+- direnv (optional, for automatic dev shell)
+- GitHub authentication (for private flake inputs)
+
+### Development Environment
+
+The repository includes a Nix development shell with all required tools:
+
+<Steps>
+  <Step title="Enable direnv (recommended)">
+    The repository includes `.envrc` for automatic dev shell activation:
+    
+    ```bash
+    cd stereos
+    direnv allow
+    ```
+    
+    This loads the development shell automatically when you enter the directory.
+  </Step>
+  
+  <Step title="Or manually enter the dev shell">
+    ```bash
+    nix develop --impure
+    ```
+  </Step>
+</Steps>
+
+The dev shell provides:
+- `gnumake` - Build orchestration
+- `qemu` - VM testing
+- `go_1_25`, `gopls`, `gotools` - Go development
+- `hurl` - HTTP testing
+- `zstd` - Compression utilities
+- `dagger` - CI engine
+
+### GitHub Authentication
+
+For private flake inputs, configure GitHub access tokens:
+
+```bash
+# Add to your shell RC file (~/.bashrc, ~/.zshrc, etc.)
+if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
+  export NIX_CONFIG="access-tokens = github.com=$(gh auth token)"
+fi
+```
+
+Then authenticate:
+
+```bash
+gh auth login
+```
+
+## Build Targets
+
+The Makefile provides convenient targets for building stereOS images.
+
+### View Available Targets
+
+```bash
+make help
+```
+
+Output:
+
+```
+stereOS development targets:
+
+  dist                           Build all formats and assemble dist/ for publishing
+  build                          Build the default base mixtape (raw image)
+  build-qcow2                    Build the default mixtape (qcow2 image)
+  build-kernel                   Build kernel artifacts for kernel boot
+  run                            Launch the built qcow2 image in QEMU
+  ssh-admin                      SSH into the running VM as admin
+  ssh-agent                      SSH into the running VM as agent
+  dagger-check                   Run Dagger CI checks
+  help                           Show this help message
+
+Build environment variables:
+  MIXTAPE=opencode-mixtape
+  ARCH=aarch64-linux
+  SSH_PORT=2222
+```
+
+### Build Raw Image
+
+The raw EFI image is the canonical stereOS artifact:
+
+```bash
+make build
+```
+
+This runs:
+
+```bash
+nix build .#packages.aarch64-linux.opencode-mixtape --impure
+```
+
+Output: `result/stereos.img`
+
+### Build QCOW2 Image
+
+For QEMU/KVM virtualization:
+
+```bash
+make build-qcow2
+```
+
+This runs:
+
+```bash
+nix build .#packages.aarch64-linux.opencode-mixtape-qcow2 --impure
+```
+
+Output: `result/stereos.qcow2`
+
+### Build Kernel Artifacts
+
+For direct kernel boot (bypasses UEFI/GRUB, ~2-4s faster):
+
+```bash
+make build-kernel
+```
+
+This runs:
+
+```bash
+nix build .#packages.aarch64-linux.opencode-mixtape-kernel-artifacts --impure
+```
+
+Output: `result-kernel/{bzImage,initrd,cmdline,init}`
+
+### Build Distribution Package
+
+Build all formats with compression and checksums:
+
+```bash
+make dist
+```
+
+This runs:
+
+```bash
+nix build .#packages.aarch64-linux.opencode-mixtape-dist --impure
+```
+
+Output:
+
+```
+result/
+├── stereos.img          # Raw EFI disk
+├── stereos.img.zst      # Zstd-compressed raw
+├── stereos.qcow2        # QCOW2 disk
+├── stereos.qcow2.zst    # Zstd-compressed QCOW2
+├── bzImage              # Kernel
+├── initrd               # Init RAM
+├── cmdline              # Kernel command line
+├── init                 # NixOS stage-2 init path
+└── mixtape.toml         # Build manifest with checksums
+```
+
+## Build Configuration
+
+Customize builds using environment variables:
+
+### Change Mixtape
+
+Build a different agent configuration:
+
+```bash
+MIXTAPE=claude-code-mixtape make build
+```
+
+Available mixtapes:
+- `opencode-mixtape` - OpenCode AI agent (default)
+- `claude-code-mixtape` - Claude Code CLI
+- `gemini-cli-mixtape` - Google Gemini CLI
+- `full-mixtape` - All agents combined
+
+### Change Architecture
+
+Build for x86_64:
+
+```bash
+ARCH=x86_64-linux make build
+```
+
+Supported architectures:
+- `aarch64-linux` (default) - ARM64
+- `x86_64-linux` - x86-64
+
+### Development Builds
+
+Add `-dev` suffix to inject SSH keys for local testing:
+
+```bash
+MIXTAPE=opencode-mixtape-dev make build-qcow2
+```
+
+Development mixtapes include `profiles/dev.nix` which reads your SSH public key from `~/.config/stereos/ssh-key.pub`.
+
+<Steps>
+  <Step title="Set up SSH key for dev builds">
+    ```bash
+    mkdir -p ~/.config/stereos
+    cp ~/.ssh/id_ed25519.pub ~/.config/stereos/ssh-key.pub
+    ```
+  </Step>
+  
+  <Step title="Build dev mixtape">
+    ```bash
+    MIXTAPE=opencode-mixtape-dev make build-qcow2
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+  Development mixtapes bake SSH keys into the image. **Never use dev builds in production.**
+  
+  Production builds inject keys ephemerally at runtime via stereosd/vsock.
+</Warning>
+
+## Direct Nix Commands
+
+For advanced use cases, invoke Nix directly:
+
+### Build Specific Mixtape
+
+```bash
+nix build .#nixosConfigurations.opencode-mixtape.config.system.build.raw --impure
+```
+
+### Build QCOW2
+
+```bash
+nix build .#nixosConfigurations.opencode-mixtape.config.system.build.qcow2 --impure
+```
+
+### Build Kernel Artifacts
+
+```bash
+nix build .#nixosConfigurations.opencode-mixtape.config.system.build.kernelArtifacts --impure -o result-kernel
+```
+
+## Build Output
+
+Build artifacts are symlinked to `result/` in the repository root:
+
+```bash
+ls -lh result/
+```
+
+Example output:
+
+```
+lrwxr-xr-x  1 user  staff    62B Mar  1 10:15 result -> /nix/store/abc123-nixos-disk-image/nixos.img
+```
+
+## Troubleshooting
+
+### Build Fails with GitHub Auth Error
+
+Ensure GitHub authentication is configured:
+
+```bash
+gh auth status
+echo $NIX_CONFIG
+```
+
+The `NIX_CONFIG` variable should include `access-tokens = github.com=...`.
+
+### Out of Disk Space
+
+Nix builds can consume significant disk space. Clean up old builds:
+
+```bash
+nix-collect-garbage -d
+```
+
+### Impure Flag Required
+
+stereOS builds require `--impure` because dev builds read SSH keys from `~/.config/stereos/`. Always include the flag:
+
+```bash
+nix build .#packages.aarch64-linux.opencode-mixtape --impure
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Running VMs" icon="play" href="/development/running-vms">
+    Test your builds in QEMU
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/development/configuration">
+    Customize mixtapes and profiles
+  </Card>
+</CardGroup>

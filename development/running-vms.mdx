@@ -1,0 +1,485 @@
+---
+title: Running and Testing VMs
+description: Launch and test stereOS images in QEMU for development
+---
+
+stereOS includes a QEMU launcher script for rapid testing of built images on both Apple Silicon and x86-64 hosts.
+
+## Quick Start
+
+Build and run a VM in one command:
+
+```bash
+make run
+```
+
+This automatically:
+1. Builds the QCOW2 image if missing
+2. Builds kernel artifacts if missing (for fast boot)
+3. Launches QEMU with optimized settings
+
+## VM Launch Script
+
+The `scripts/run-vm.sh` script provides flexible VM launching with auto-detection of boot modes and image formats.
+
+### Basic Usage
+
+```bash
+./scripts/run-vm.sh [path-to-image] [ssh-port]
+```
+
+Defaults:
+- Image: `./result/stereos.img` (raw) or `./result/stereos.qcow2`
+- SSH port: `2222`
+
+### Examples
+
+<CodeGroup>
+```bash Default (auto-detect)
+./scripts/run-vm.sh
+```
+
+```bash Custom image
+./scripts/run-vm.sh result/stereos.qcow2
+```
+
+```bash Custom SSH port
+./scripts/run-vm.sh result/stereos.qcow2 3333
+```
+
+```bash Environment variable
+SSH_PORT=3333 make run
+```
+</CodeGroup>
+
+## Boot Modes
+
+The VM script supports two boot modes with automatic detection:
+
+### Direct Kernel Boot (Recommended)
+
+**2-4 seconds faster** than EFI boot. Uses kernel artifacts to bypass UEFI/GRUB entirely.
+
+<Steps>
+  <Step title="Build kernel artifacts">
+    ```bash
+    make build-kernel
+    ```
+    
+    Output: `result-kernel/{bzImage,initrd,cmdline}`
+  </Step>
+  
+  <Step title="Launch VM">
+    ```bash
+    make run
+    ```
+    
+    The script auto-detects kernel artifacts in `./result-kernel/` or `./result-kernel-artifacts/`.
+  </Step>
+</Steps>
+
+QEMU arguments used:
+
+```bash
+-kernel result-kernel/bzImage
+-initrd result-kernel/initrd
+-append "$(cat result-kernel/cmdline)"
+```
+
+### EFI Boot (Fallback)
+
+Uses OVMF firmware and GRUB bootloader from the disk image.
+
+<Steps>
+  <Step title="Enter dev shell">
+    Required for `STEREOS_EFI_CODE` environment variable:
+    
+    ```bash
+    nix develop --impure
+    ```
+  </Step>
+  
+  <Step title="Launch VM">
+    ```bash
+    ./scripts/run-vm.sh result/stereos.qcow2
+    ```
+  </Step>
+</Steps>
+
+QEMU arguments used:
+
+```bash
+-drive if=pflash,format=raw,readonly=on,file=$STEREOS_EFI_CODE
+-drive if=pflash,format=raw,file=$WORK_DIR/efi-vars.fd
+```
+
+## VM Configuration
+
+The QEMU VM is configured with the following hardware:
+
+### CPU and Memory
+
+```bash
+-machine virt,highmem=on    # ARM virt machine with high memory
+-accel hvf                   # Hardware acceleration (macOS)
+-cpu host                    # Pass through host CPU features
+-m 4G                        # 4GB RAM
+-smp 4                       # 4 CPU cores
+```
+
+### Disk
+
+```bash
+-drive if=virtio,format=qcow2,file=$WORK_IMAGE,discard=unmap
+```
+
+The script automatically converts raw images to QCOW2 for runtime mutations:
+
+```bash
+qemu-img convert -f raw -O qcow2 stereos.img stereos.qcow2
+```
+
+### Networking
+
+```bash
+-device virtio-net-pci,netdev=net0
+-netdev user,id=net0,hostfwd=tcp::2222-:22
+```
+
+Port forwarding:
+- Host port `2222` → VM port `22` (SSH)
+- Accessible via `ssh -p 2222 admin@localhost`
+
+### Vsock (Linux hosts only)
+
+```bash
+-device vhost-vsock-pci,guest-cid=3
+```
+
+Vsock provides a high-performance communication channel between host and guest:
+- **CID 3** - stereosd control plane
+- Used for ephemeral SSH key injection
+- Secret management without network exposure
+
+<Note>
+  Vsock requires the Linux `vhost-vsock` kernel module (`/dev/vhost-vsock`).
+  
+  On macOS, vsock is unavailable. The VM still runs, but stereosd's vsock listener will fail to bind. SSH access via port forwarding still works.
+</Note>
+
+## Connecting to the VM
+
+Once the VM boots, you'll see:
+
+```
+══════════════════════════════════════════════════════════
+  stereOS VM starting
+  Boot:   direct-kernel
+  Image:  ./result/stereos.qcow2
+  Kernel: ./result-kernel/bzImage
+  SSH:    ssh -p 2222 admin@localhost
+          ssh -p 2222 agent@localhost
+  Vsock:  CID=3 (stereosd control plane)
+  Quit:   Ctrl-A X
+══════════════════════════════════════════════════════════
+```
+
+### SSH as Admin
+
+The admin user has full system access with passwordless sudo:
+
+<CodeGroup>
+```bash Makefile
+make ssh-admin
+```
+
+```bash Direct
+ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 admin@localhost
+```
+</CodeGroup>
+
+### SSH as Agent
+
+The agent user has a restricted environment:
+
+<CodeGroup>
+```bash Makefile
+make ssh-agent
+```
+
+```bash Direct
+ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 agent@localhost
+```
+</CodeGroup>
+
+<Warning>
+  For SSH access, you must use a **development mixtape** (`*-dev`) with SSH keys baked in.
+  
+  Production mixtapes require ephemeral key injection via stereosd/vsock at runtime.
+</Warning>
+
+### Set Up Dev SSH Keys
+
+<Steps>
+  <Step title="Copy your public key">
+    ```bash
+    mkdir -p ~/.config/stereos
+    cp ~/.ssh/id_ed25519.pub ~/.config/stereos/ssh-key.pub
+    ```
+  </Step>
+  
+  <Step title="Build dev mixtape">
+    ```bash
+    MIXTAPE=opencode-mixtape-dev make build-qcow2
+    ```
+  </Step>
+  
+  <Step title="Run VM and connect">
+    ```bash
+    make run
+    make ssh-admin
+    ```
+  </Step>
+</Steps>
+
+## VM Console
+
+The VM runs with `-nographic`, displaying serial console output in your terminal.
+
+### Boot Messages
+
+You'll see NixOS boot messages:
+
+```
+[    0.000000] Booting Linux on physical CPU 0x0000000000 [0x610f0000]
+[    0.000000] Linux version 6.12.0 (nixbld@localhost) (gcc (GCC) 13.2.0)
+...
+[    2.451234] stereosd[412]: Starting stereOS system daemon
+[    2.523456] agentd[415]: Starting agent management daemon
+
+stereOS (opencode-mixtape)
+
+opencode-mixtape login:
+```
+
+### ASCII Art Banner
+
+On successful SSH login:
+
+```
+  ______   ______  ______   ______   ______   ______   ______
+ /\  ___\ /\__  _\/\  ___\ /\  == \ /\  ___\ /\  __ \ /\  ___\
+ \ \___  \\/_/\ \/\ \  __\ \ \  __< \ \  __\ \ \ \/\ \\ \___  \
+  \/\_____\  \ \_\ \ \_____\\ \_\ \_\\ \_____\\ \_____\\/\_____\
+   \/_____/   \/_/  \/_____/ \/_/ /_/ \/_____/ \/_____/ \/_____/
+
+    Mixtape: opencode-mixtape
+```
+
+### Exit QEMU
+
+To quit the VM:
+
+1. Press `Ctrl-A`
+2. Then press `X`
+
+Or send SIGTERM:
+
+```bash
+pkill qemu-system-aarch64
+```
+
+## Testing and Development
+
+### Rapid Iteration
+
+For fast development cycles:
+
+<Steps>
+  <Step title="Make code changes">
+    Edit NixOS modules, profiles, or mixtapes.
+  </Step>
+  
+  <Step title="Rebuild and relaunch">
+    ```bash
+    make build-qcow2 && make run
+    ```
+    
+    Or in one command:
+    ```bash
+    make run  # Auto-rebuilds if result/ is missing
+    ```
+  </Step>
+  
+  <Step title="Test in VM">
+    ```bash
+    make ssh-admin
+    systemctl status agentd
+    journalctl -u stereosd -f
+    ```
+  </Step>
+</Steps>
+
+### Test Different Mixtapes
+
+```bash
+MIXTAPE=claude-code-mixtape-dev make build-qcow2
+make run
+make ssh-agent
+which claude-code
+```
+
+### Multiple VMs
+
+Run multiple VMs simultaneously with different SSH ports:
+
+<CodeGroup>
+```bash Terminal 1
+SSH_PORT=2222 make run
+```
+
+```bash Terminal 2
+SSH_PORT=3333 ./scripts/run-vm.sh result/stereos.qcow2 3333
+```
+</CodeGroup>
+
+## Debugging
+
+### View System Logs
+
+```bash
+make ssh-admin
+journalctl -xe                    # Recent logs
+journalctl -u stereosd -f         # Follow stereosd
+journalctl -u agentd -f           # Follow agentd
+```
+
+### Check Service Status
+
+```bash
+systemctl status stereosd
+systemctl status agentd
+systemctl status sshd
+```
+
+### Inspect Agent Environment
+
+```bash
+make ssh-agent
+echo $PATH
+which opencode
+ls -la ~/workspace
+```
+
+### Disk Usage
+
+```bash
+df -h
+du -sh /nix/store
+```
+
+### Network Connectivity
+
+```bash
+ping -c 3 1.1.1.1
+curl -I https://api.anthropic.com
+```
+
+## Performance Optimization
+
+### Use Direct Kernel Boot
+
+Saves 2-4 seconds by skipping UEFI/GRUB:
+
+```bash
+make build-kernel
+make run
+```
+
+### Increase Resources
+
+Edit `scripts/run-vm.sh` to customize VM resources:
+
+```bash
+-m 8G                        # 8GB RAM instead of 4GB
+-smp 8                       # 8 CPU cores instead of 4
+```
+
+### Use Tmpfs
+
+The VM uses tmpfs for `/tmp` (ephemeral, RAM-backed). No changes needed.
+
+## Troubleshooting
+
+### No Image Found
+
+```
+ERROR: No image found.
+Build one first:
+  make build         # → result/stereos.img (raw)
+  make build-qcow2   # → result/stereos.qcow2
+```
+
+Solution:
+
+```bash
+make build-qcow2
+```
+
+### EFI Firmware Not Found
+
+```
+ERROR: STEREOS_EFI_CODE is not set.
+Run this script from inside the nix devShell: nix develop
+```
+
+Solution:
+
+```bash
+nix develop --impure
+./scripts/run-vm.sh
+```
+
+Or use direct kernel boot:
+
+```bash
+make build-kernel
+make run
+```
+
+### SSH Connection Refused
+
+Ensure you're using a dev mixtape:
+
+```bash
+MIXTAPE=opencode-mixtape-dev make build-qcow2
+```
+
+And that your SSH key is configured:
+
+```bash
+ls ~/.config/stereos/ssh-key.pub
+```
+
+### Port Already in Use
+
+```
+qemu-system-aarch64: -netdev user,id=net0,hostfwd=tcp::2222-:22: Failed to bind socket: Address already in use
+```
+
+Use a different port:
+
+```bash
+SSH_PORT=3333 make run
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration" icon="sliders" href="/development/configuration">
+    Customize mixtapes and options
+  </Card>
+  <Card title="Contributing" icon="code-pull-request" href="/development/contributing">
+    Submit changes to stereOS
+  </Card>
+</CardGroup>

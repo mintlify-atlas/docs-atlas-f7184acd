@@ -1,0 +1,146 @@
+---
+title: OpenCode Mixtape
+description: stereOS with OpenCode terminal AI coding agent
+---
+
+The OpenCode mixtape includes the [OpenCode](https://opencode.ai/) terminal AI coding agent, providing interactive CLI-based AI assistance for software development.
+
+## Overview
+
+**Agent binary**: `opencode`  
+**Package**: `pkgs.opencode` (nixpkgs-unstable)  
+**Config location**: `~/.config/opencode/config.json`  
+**Mixtape name**: `opencode-mixtape`
+
+## Configuration
+
+The OpenCode mixtape is defined in `mixtapes/opencode/base.nix`:
+
+```nix
+{ config, lib, pkgs, ... }:
+
+{
+  # Add opencode to the agent's restricted PATH
+  stereos.agent.extraPackages = [ pkgs.opencode ];
+
+  # Also make it available system-wide (for admin use)
+  environment.systemPackages = [ pkgs.opencode ];
+
+  # Seed a default configuration file for the agent user
+  environment.etc."skel/.config/opencode/config.json".text = builtins.toJSON {
+    "$schema" = "https://opencode.ai/config.json";
+  };
+}
+```
+
+## Required Environment Variables
+
+OpenCode supports multiple AI providers. You must set **one** of the following:
+
+<CodeGroup>
+```bash Anthropic (Claude)
+export ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+```bash OpenAI (GPT)
+export OPENAI_API_KEY="sk-..."
+```
+</CodeGroup>
+
+<Tip>
+OpenCode can use either Anthropic's Claude models or OpenAI's GPT models. Set the appropriate API key for your preferred provider.
+</Tip>
+
+## Usage
+
+Once deployed, connect to your stereOS instance and run:
+
+```bash
+opencode
+```
+
+The agent user has OpenCode pre-configured and ready to use in the `/home/agent/workspace` directory.
+
+## Available Tools
+
+The agent user's PATH includes OpenCode plus these base packages:
+
+- **Core utilities**: `coreutils`, `grep`, `sed`, `awk`, `find`, `diff`, `less`
+- **Development**: `git`, `curl`, `jq`, `ripgrep`, `tree`, `make`
+- **Editors**: `vim`
+- **Terminal**: `tmux`
+- **Monitoring**: `htop`, `ps`, `top`
+- **Networking**: `ssh`, TLS certificates
+
+## Building the Mixtape
+
+The OpenCode mixtape is defined in `flake.nix`:
+
+```nix
+nixosConfigurations = {
+  # Production configuration
+  opencode-mixtape = stereos-lib.mkMixtape {
+    name = "opencode-mixtape";
+    features = [ ./mixtapes/opencode/base.nix ];
+  };
+
+  # Dev configuration (with SSH key injection)
+  opencode-mixtape-dev = stereos-lib.mkMixtape {
+    name = "opencode-mixtape";
+    features = [ ./mixtapes/opencode/base.nix ];
+    extraModules = [ ./profiles/dev.nix ];
+  };
+};
+```
+
+### Build Commands
+
+<CodeGroup>
+```bash Production Image
+# Build raw EFI image
+nix build .#nixosConfigurations.opencode-mixtape.config.system.build.raw
+
+# Build QCOW2 image
+nix build .#nixosConfigurations.opencode-mixtape.config.system.build.qcow2
+```
+
+```bash Development Image
+# Build with SSH key injection
+nix build .#nixosConfigurations.opencode-mixtape-dev.config.system.build.raw
+```
+
+```bash Using Makefile
+# Build all formats
+make opencode-mixtape
+
+# Build dev variant
+make opencode-mixtape-dev
+```
+</CodeGroup>
+
+## Configuration File
+
+OpenCode's configuration is stored at `~/.config/opencode/config.json`. The mixtape seeds a minimal default configuration with the schema reference.
+
+You can customize OpenCode's behavior by editing this file. See the [OpenCode documentation](https://opencode.ai/docs) for available options.
+
+## Security Features
+
+The agent user in this mixtape:
+
+- **Cannot use sudo**: Explicitly denied all sudo access
+- **Restricted PATH**: Only approved binaries are accessible
+- **No Nix access**: Cannot run `nix`, `nixos-rebuild`, or other Nix tooling
+- **Isolated workspace**: Works in `/home/agent/workspace` with limited system access
+- **Clean environment**: All Nix-related variables are unset in the agent shell
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Running VMs" icon="rocket" href="/development/running-vms">
+    Deploy and run this mixtape
+  </Card>
+  <Card title="Create Custom Mixtape" icon="wrench" href="/mixtapes/creating-custom">
+    Build your own mixtape based on this one
+  </Card>
+</CardGroup>

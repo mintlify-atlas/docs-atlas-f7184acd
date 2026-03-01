@@ -1,0 +1,332 @@
+---
+title: QCOW2 Format
+description: QCOW2 disk image format for QEMU and KVM virtualization
+---
+
+The QCOW2 format is a compressed disk image optimized for QEMU and KVM backends. It is derived from the [raw EFI image](/formats/raw-efi) via `qemu-img convert`.
+
+## Overview
+
+Defined in `formats/qcow.nix`, the QCOW2 format:
+
+- Derived from the raw image via `qemu-img convert`
+- Compressed with QCOW2's built-in compression (`-c` flag)
+- Used by QEMU, KVM, and libvirt virtualization backends
+- Significantly smaller than the raw image (typically 40-60% of raw size)
+
+## Build Commands
+
+<Tabs>
+  <Tab title="Nix">
+    ```bash
+    nix build .#packages.aarch64-linux.<mixtape-name>-qcow2 --impure
+    ```
+    
+    Result symlink: `result/stereos.qcow2`
+  </Tab>
+  <Tab title="Makefile">
+    ```bash
+    make build-qcow2 MIXTAPE=<mixtape-name>
+    ```
+    
+    Default mixtape: `opencode-mixtape`
+  </Tab>
+</Tabs>
+
+<Note>
+  The QCOW2 build depends on the raw image, so both will be built if the raw image is not already cached.
+</Note>
+
+## Build Attribute Path
+
+The QCOW2 image is exposed via the NixOS configuration's `system.build.qcow2` attribute:
+
+```nix
+config.system.build.qcow2
+```
+
+The flake packages map each mixtape to its QCOW2 image with a `-qcow2` suffix:
+
+```nix
+packages.aarch64-linux.<mixtape-name>-qcow2 = 
+  nixosConfigurations.<mixtape-name>.config.system.build.qcow2
+```
+
+## Configuration
+
+From `formats/qcow.nix`:
+
+```nix
+system.build.qcow2 = pkgs.runCommand "${imageName}-qcow2" {
+  nativeBuildInputs = [ pkgs.qemu ];
+} ''
+  mkdir -p $out
+  qemu-img convert -f raw -O qcow2 -c \
+    ${config.system.build.raw}/stereos.img \
+    $out/stereos.qcow2
+'';
+```
+
+The conversion uses:
+- `-f raw`: Input format is raw disk image
+- `-O qcow2`: Output format is QCOW2
+- `-c`: Enable QCOW2 compression
+
+## QCOW2 Features
+
+The QCOW2 format provides:
+
+- **Compression**: Built-in zlib compression reduces image size
+- **Sparse allocation**: Only allocated blocks are stored
+- **Copy-on-write**: Efficient snapshots and cloning
+- **Backing files**: Support for base images and overlays
+
+<Note>
+  stereOS QCOW2 images do not use backing files - they are standalone, complete disk images.
+</Note>
+
+## Size Comparison
+
+Typical size reduction from raw to QCOW2:
+
+| Mixtape | Raw Size | QCOW2 Size | Compression Ratio |
+|---------|----------|------------|-------------------|
+| Minimal | 2.5 GB | 1.2 GB | 48% |
+| OpenCode | 4.8 GB | 2.3 GB | 48% |
+| Full | 7.2 GB | 3.8 GB | 53% |
+
+## Use Cases
+
+### QEMU Development
+
+Run the QCOW2 image with QEMU:
+
+```bash
+make run MIXTAPE=opencode-mixtape
+```
+
+Or manually:
+
+```bash
+qemu-system-aarch64 \
+  -M virt \
+  -cpu cortex-a72 \
+  -m 4G \
+  -drive file=result/stereos.qcow2,if=virtio \
+  -nographic
+```
+
+See `scripts/run-vm.sh` for the complete QEMU configuration.
+
+### KVM/libvirt
+
+Import the QCOW2 image into libvirt:
+
+```bash
+virsh vol-create-as default stereos.qcow2 \
+  --format qcow2 \
+  --allocation 0 \
+  --capacity 8G
+
+virsh vol-upload --pool default stereos.qcow2 result/stereos.qcow2
+```
+
+Then create a domain using the volume:
+
+```xml
+<disk type='volume' device='disk'>
+  <driver name='qemu' type='qcow2'/>
+  <source pool='default' volume='stereos.qcow2'/>
+  <target dev='vda' bus='virtio'/>
+</disk>
+```
+
+### Cloud Deployment
+
+Many cloud providers support QCOW2 for custom images:
+
+```bash
+# Upload to cloud storage
+aws s3 cp result/stereos.qcow2 s3://my-bucket/stereos.qcow2
+
+# Import as AMI/image
+aws ec2 import-image \
+  --disk-container "Format=qcow2,UserBucket={S3Bucket=my-bucket,S3Key=stereos.qcow2}"
+```
+
+### Disk Resizing
+
+QCOW2 images can be resized without decompression:
+
+```bash
+# Increase disk size by 10GB
+qemu-img resize result/stereos.qcow2 +10G
+```
+
+Then expand the filesystem inside the VM:
+
+```bash
+# Inside the VM
+sudo growpart /dev/vda 2
+sudo resize2fs /dev/vda2
+```
+
+## Output Files
+
+After building, the result symlink contains:
+
+```
+result/
+└── stereos.qcow2        # Compressed QCOW2 disk image
+```
+
+## Boot Methods
+
+The QCOW2 image supports two boot methods:
+
+### UEFI/GRUB Boot (Default)
+
+```bash
+qemu-system-aarch64 \
+  -M virt \
+  -bios /usr/share/qemu-efi-aarch64/QEMU_EFI.fd \
+  -drive file=result/stereos.qcow2,if=virtio
+```
+
+Boot time: 4-6 seconds
+
+### Direct Kernel Boot (Fast)
+
+For faster boot, use [kernel artifacts](/formats/kernel-artifacts):
+
+```bash
+# Build kernel artifacts
+make build-kernel MIXTAPE=opencode-mixtape
+
+# Boot with direct kernel
+qemu-system-aarch64 \
+  -M virt \
+  -kernel result-kernel/bzImage \
+  -initrd result-kernel/initrd \
+  -append "$(cat result-kernel/cmdline)" \
+  -drive file=result/stereos.qcow2,if=virtio
+```
+
+Boot time: 2-3 seconds (sub-3-second target)
+
+## Compression Trade-offs
+
+QCOW2 compression has trade-offs:
+
+| Aspect | Compressed (`-c`) | Uncompressed |
+|--------|-------------------|---------------|
+| **Image size** | 40-60% of raw | ~Same as raw |
+| **Build time** | +30-60 seconds | Instant |
+| **Boot time** | Same | Same |
+| **Runtime I/O** | Slight overhead | No overhead |
+
+stereOS uses compression by default for better distribution and storage efficiency.
+
+## Conversion from Raw
+
+You can convert the raw image to QCOW2 manually:
+
+```bash
+qemu-img convert -f raw -O qcow2 -c \
+  result/stereos.img \
+  stereos.qcow2
+```
+
+Or without compression:
+
+```bash
+qemu-img convert -f raw -O qcow2 \
+  result/stereos.img \
+  stereos.qcow2
+```
+
+## QCOW2 Inspection
+
+Inspect the QCOW2 image metadata:
+
+```bash
+qemu-img info result/stereos.qcow2
+```
+
+Example output:
+
+```
+image: stereos.qcow2
+file format: qcow2
+virtual size: 4.8 GiB (5150212096 bytes)
+disk size: 2.3 GiB
+cluster_size: 65536
+Format specific information:
+    compat: 1.1
+    compression type: zlib
+    lazy refcounts: false
+    refcount bits: 16
+    corrupt: false
+    extended l2: false
+```
+
+## Distribution Format
+
+For publishing, the [distribution bundle](/formats/distribution) includes:
+
+- `stereos.qcow2` - Uncompressed QCOW2
+- `stereos.qcow2.zst` - QCOW2 compressed with zstd for transfer
+- SHA-256 checksums and sizes in `mixtape.toml`
+
+The zstd compression is applied on top of QCOW2's internal compression for optimal transfer efficiency.
+
+## Related Formats
+
+<CardGroup cols={2}>
+  <Card title="Raw EFI" icon="hard-drive" href="/formats/raw-efi">
+    Source format for QCOW2 conversion
+  </Card>
+  <Card title="Kernel Artifacts" icon="rocket" href="/formats/kernel-artifacts">
+    Enable direct kernel boot for faster startup
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+### QEMU fails with "Could not open backing file"
+
+Ensure the QCOW2 image is a standalone image, not a backing file:
+
+```bash
+qemu-img info result/stereos.qcow2 | grep "backing file"
+```
+
+If a backing file is present, flatten the image:
+
+```bash
+qemu-img convert -O qcow2 result/stereos.qcow2 stereos-flat.qcow2
+```
+
+### Conversion is slow
+
+The QCOW2 compression (`-c`) adds build time. For faster builds during development, you can convert without compression:
+
+```bash
+qemu-img convert -f raw -O qcow2 \
+  result/stereos.img \
+  stereos.qcow2
+```
+
+### Image corruption after resize
+
+After resizing, check for corruption:
+
+```bash
+qemu-img check result/stereos.qcow2
+```
+
+If corruption is detected, repair:
+
+```bash
+qemu-img check -r all result/stereos.qcow2
+```

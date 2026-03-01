@@ -1,0 +1,139 @@
+---
+title: "User Modules"
+description: "Agent and admin user configuration"
+---
+
+stereOS defines two user accounts with distinct privilege levels:
+
+- **agent** - Restricted user with curated package access, no Nix tooling
+- **admin** - Full-access user with sudo and wheel group membership
+
+## Agent User
+
+Defined in `modules/users/agent.nix`.
+
+### Restricted Shell
+
+The agent user runs a custom shell that:
+
+1. Sets `PATH` to only approved binaries from `stereos.agent.basePackages` and `stereos.agent.extraPackages`
+2. Unsets all Nix-related environment variables
+3. Defaults working directory to `~/workspace`
+4. Execs into a clean bash session
+
+```nix
+agentShell = pkgs.writeShellScriptBin "stereos-agent-shell" ''
+  # Set PATH to only approved binaries
+  export PATH="${agentEnv}/bin:${extraEnv}/bin"
+  
+  # Ensure TLS certificates work
+  export SSL_CERT_FILE="${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+  
+  # Nuke all Nix-related environment variables
+  unset NIX_PATH NIX_REMOTE NIX_CONF_DIR NIX_USER_CONF_FILES
+  unset NIX_PROFILES NIX_STORE
+  
+  # Default working directory
+  if [ -d "$HOME/workspace" ]; then
+    cd "$HOME/workspace"
+  fi
+  
+  exec ${pkgs.bash}/bin/bash --login "$@"
+'';
+```
+
+### User Configuration
+
+```nix
+users.users.agent = {
+  isNormalUser = true;
+  group = "agent";
+  home = "/home/agent";
+  shell = "${agentShell}/bin/stereos-agent-shell";
+  extraGroups = [];  # No additional groups
+  openssh.authorizedKeys.keys = config.stereos.ssh.authorizedKeys;
+};
+```
+
+### Workspace Directory
+
+The agent's writable working directory is created at boot:
+
+```nix
+systemd.tmpfiles.rules = [
+  "d /home/agent/workspace 0755 agent agent -"
+];
+```
+
+In production, this may be a mount point for virtio-fs or 9p shared directory from the host.
+
+### Sudo Denial
+
+The agent is explicitly denied all sudo access:
+
+```nix
+security.sudo = {
+  enable = true;
+  extraConfig = ''
+    # Explicitly deny ALL sudo access for the agent user.
+    # This must come BEFORE any permissive rules.
+    agent ALL=(ALL:ALL) !ALL
+  '';
+};
+```
+
+### Options Declared
+
+The agent module declares the shared stereOS options:
+
+- `stereos.ssh.authorizedKeys` - SSH keys for both admin and agent
+- `stereos.agent.basePackages` - Curated base packages
+- `stereos.agent.extraPackages` - Additional packages from feature modules
+
+See [stereos.ssh.authorizedKeys](/api/options/stereos-ssh) and [stereos.agent options](/api/options/stereos-agent) for details.
+
+## Admin User
+
+Defined in `modules/users/admin.nix`.
+
+### User Configuration
+
+```nix
+users.users.admin = {
+  isNormalUser = true;
+  extraGroups = [ "wheel" "admin" ];
+  openssh.authorizedKeys.keys = config.stereos.ssh.authorizedKeys;
+};
+```
+
+- `wheel` group - Grants sudo access
+- `admin` group - Controls access to stereosd/agentd sockets and tmux sessions
+
+### Passwordless Sudo
+
+```nix
+security.sudo = {
+  enable = true;
+  wheelNeedsPassword = false;
+};
+```
+
+Admin users can run `sudo` without entering a password.
+
+## Privilege Hierarchy
+
+```
+root > admin > agent
+  |      |       |
+  |      |       +-- Restricted shell, no sudo, no Nix access
+  |      |
+  |      +-- Passwordless sudo, socket access, full system access
+  |
+  +-- System daemon access, direct Nix daemon
+```
+
+## Source Reference
+
+View the module sources:
+- Agent: `modules/users/agent.nix:1`
+- Admin: `modules/users/admin.nix:1`

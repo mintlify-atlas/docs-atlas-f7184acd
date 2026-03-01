@@ -1,0 +1,206 @@
+---
+title: Full Mixtape
+description: stereOS with all AI coding agents included
+---
+
+The Full mixtape includes **all available AI coding agents** in a single image. This provides maximum flexibility, allowing you to use any agent or switch between them based on your needs.
+
+## Overview
+
+**Included agents**: OpenCode, Claude Code, Gemini CLI  
+**Agent binaries**: `opencode`, `claude`, `gemini`  
+**Mixtape name**: `full-mixtape`
+
+## Configuration
+
+The Full mixtape is defined in `mixtapes/full/base.nix` by importing all individual mixtape configurations:
+
+```nix
+{ config, lib, pkgs, ... }:
+
+{
+  imports = [
+    ../opencode/base.nix
+    ../claude-code/base.nix
+    ../gemini-cli/base.nix
+  ];
+}
+```
+
+This composition approach means:
+- All agent packages are added to `stereos.agent.extraPackages`
+- All configuration files are seeded
+- All environment variables from individual mixtapes are set
+
+## Required Environment Variables
+
+Depending on which agent you want to use, you need to set the appropriate API key(s):
+
+<CodeGroup>
+```bash OpenCode
+# Supports either provider
+export ANTHROPIC_API_KEY="sk-ant-..."
+# OR
+export OPENAI_API_KEY="sk-..."
+```
+
+```bash Claude Code
+# Requires Anthropic
+export ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+```bash Gemini CLI
+# Supports either variable name
+export GEMINI_API_KEY="..."
+# OR
+export GOOGLE_API_KEY="..."
+```
+
+```bash All Agents
+# Set all keys to use any agent
+export ANTHROPIC_API_KEY="sk-ant-..."
+export OPENAI_API_KEY="sk-..."
+export GEMINI_API_KEY="..."
+```
+</CodeGroup>
+
+<Tip>
+You only need to set the API keys for the agents you plan to use. The other agents will still be available but won't function without their keys.
+</Tip>
+
+## Usage
+
+Once deployed, you can use any of the included agents:
+
+```bash
+# Use OpenCode
+opencode
+
+# Use Claude Code
+claude
+
+# Use Gemini CLI
+gemini
+```
+
+All agents work in the `/home/agent/workspace` directory and have access to the same base tools.
+
+## Included Agents
+
+### OpenCode
+- **Binary**: `opencode`
+- **Config**: `~/.config/opencode/config.json`
+- **Provider**: Anthropic (Claude) or OpenAI (GPT)
+- **API Key**: `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`
+
+### Claude Code
+- **Binary**: `claude`
+- **Config**: None (uses API directly)
+- **Provider**: Anthropic (Claude)
+- **API Key**: `ANTHROPIC_API_KEY`
+- **Features**: Auto-update disabled (`DISABLE_AUTOUPDATER=1`)
+
+### Gemini CLI
+- **Binary**: `gemini`
+- **Config**: None (uses API directly)
+- **Provider**: Google (Gemini)
+- **API Key**: `GEMINI_API_KEY` or `GOOGLE_API_KEY`
+
+## Available Tools
+
+The agent user's PATH includes all three AI agents plus these base packages:
+
+- **Core utilities**: `coreutils`, `grep`, `sed`, `awk`, `find`, `diff`, `less`
+- **Development**: `git`, `curl`, `jq`, `ripgrep`, `tree`, `make`
+- **Editors**: `vim`
+- **Terminal**: `tmux`
+- **Monitoring**: `htop`, `ps`, `top`
+- **Networking**: `ssh`, TLS certificates
+
+## Building the Mixtape
+
+The Full mixtape is defined in `flake.nix`:
+
+```nix
+nixosConfigurations = {
+  # Production configuration
+  full-mixtape = stereos-lib.mkMixtape {
+    name = "full-mixtape";
+    features = [ ./mixtapes/full/base.nix ];
+  };
+
+  # Dev configuration (with SSH key injection)
+  full-mixtape-dev = stereos-lib.mkMixtape {
+    name = "full-mixtape";
+    features = [ ./mixtapes/full/base.nix ];
+    extraModules = [ ./profiles/dev.nix ];
+  };
+};
+```
+
+### Build Commands
+
+<CodeGroup>
+```bash Production Image
+# Build raw EFI image
+nix build .#nixosConfigurations.full-mixtape.config.system.build.raw
+
+# Build QCOW2 image
+nix build .#nixosConfigurations.full-mixtape.config.system.build.qcow2
+```
+
+```bash Development Image
+# Build with SSH key injection
+nix build .#nixosConfigurations.full-mixtape-dev.config.system.build.raw
+```
+
+```bash Using Makefile
+# Build all formats
+make full-mixtape
+
+# Build dev variant
+make full-mixtape-dev
+```
+</CodeGroup>
+
+## Image Size Considerations
+
+The Full mixtape includes all agents, which results in a larger image size compared to individual mixtapes:
+
+- **Benefit**: Maximum flexibility with all agents available
+- **Trade-off**: Larger disk footprint and longer build times
+- **Recommendation**: Use individual mixtapes if you only need one specific agent
+
+## When to Use the Full Mixtape
+
+Choose the Full mixtape when:
+
+- You want to experiment with different AI agents
+- Your workflow involves switching between providers
+- You need fallback options if one provider is unavailable
+- You're building a development/testing environment
+- Disk space and image size are not primary concerns
+
+For production deployments with a known agent preference, consider using a specific mixtape instead.
+
+## Security Features
+
+The agent user in this mixtape:
+
+- **Cannot use sudo**: Explicitly denied all sudo access
+- **Restricted PATH**: Only approved binaries are accessible
+- **No Nix access**: Cannot run `nix`, `nixos-rebuild`, or other Nix tooling
+- **Isolated workspace**: Works in `/home/agent/workspace` with limited system access
+- **Clean environment**: All Nix-related variables are unset in the agent shell
+- **No auto-updates**: Claude Code's update mechanism is disabled
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Running VMs" icon="rocket" href="/development/running-vms">
+    Deploy and run this mixtape
+  </Card>
+  <Card title="OpenCode Docs" icon="code" href="/mixtapes/opencode">
+    Learn more about OpenCode
+  </Card>
+</CardGroup>

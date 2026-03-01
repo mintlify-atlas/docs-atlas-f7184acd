@@ -1,0 +1,156 @@
+---
+title: Gemini CLI Mixtape
+description: stereOS with Google's Gemini CLI coding agent
+---
+
+The Gemini CLI mixtape includes Google's [Gemini](https://ai.google.dev/) CLI coding agent, providing terminal-based AI assistance powered by Google's Gemini models.
+
+## Overview
+
+**Agent binary**: `gemini`  
+**Package**: `pkgs.gemini-cli` (nixpkgs-unstable)  
+**Mixtape name**: `gemini-cli-mixtape`
+
+## Configuration
+
+The Gemini CLI mixtape is defined in `mixtapes/gemini-cli/base.nix`:
+
+```nix
+{ config, lib, pkgs, ... }:
+
+{
+  # Add gemini-cli to the agent's restricted PATH
+  stereos.agent.extraPackages = [ pkgs.gemini-cli ];
+
+  # Also make it available system-wide (for admin use)
+  environment.systemPackages = [ pkgs.gemini-cli ];
+}
+```
+
+## Required Environment Variables
+
+Gemini CLI supports two environment variable names. You must set **one** of the following:
+
+<CodeGroup>
+```bash GEMINI_API_KEY
+export GEMINI_API_KEY="..."
+```
+
+```bash GOOGLE_API_KEY
+export GOOGLE_API_KEY="..."
+```
+</CodeGroup>
+
+<Tip>
+Both `GEMINI_API_KEY` and `GOOGLE_API_KEY` are accepted. Use whichever you prefer or matches your existing setup.
+</Tip>
+
+## Usage
+
+Once deployed, connect to your stereOS instance and run:
+
+```bash
+gemini
+```
+
+The agent user has Gemini CLI pre-configured and ready to use in the `/home/agent/workspace` directory.
+
+## Available Tools
+
+The agent user's PATH includes Gemini CLI plus these base packages:
+
+- **Core utilities**: `coreutils`, `grep`, `sed`, `awk`, `find`, `diff`, `less`
+- **Development**: `git`, `curl`, `jq`, `ripgrep`, `tree`, `make`
+- **Editors**: `vim`
+- **Terminal**: `tmux`
+- **Monitoring**: `htop`, `ps`, `top`
+- **Networking**: `ssh`, TLS certificates
+
+## Building the Mixtape
+
+The Gemini CLI mixtape is defined in `flake.nix`:
+
+```nix
+nixosConfigurations = {
+  # Production configuration
+  gemini-cli-mixtape = stereos-lib.mkMixtape {
+    name = "gemini-cli-mixtape";
+    features = [ ./mixtapes/gemini-cli/base.nix ];
+  };
+
+  # Dev configuration (with SSH key injection)
+  gemini-cli-mixtape-dev = stereos-lib.mkMixtape {
+    name = "gemini-cli-mixtape";
+    features = [ ./mixtapes/gemini-cli/base.nix ];
+    extraModules = [ ./profiles/dev.nix ];
+  };
+};
+```
+
+### Build Commands
+
+<CodeGroup>
+```bash Production Image
+# Build raw EFI image
+nix build .#nixosConfigurations.gemini-cli-mixtape.config.system.build.raw
+
+# Build QCOW2 image
+nix build .#nixosConfigurations.gemini-cli-mixtape.config.system.build.qcow2
+```
+
+```bash Development Image
+# Build with SSH key injection
+nix build .#nixosConfigurations.gemini-cli-mixtape-dev.config.system.build.raw
+```
+
+```bash Using Makefile
+# Build all formats
+make gemini-cli-mixtape
+
+# Build dev variant
+make gemini-cli-mixtape-dev
+```
+</CodeGroup>
+
+## Security Features
+
+The agent user in this mixtape:
+
+- **Cannot use sudo**: Explicitly denied all sudo access
+- **Restricted PATH**: Only approved binaries are accessible
+- **No Nix access**: Cannot run `nix`, `nixos-rebuild`, or other Nix tooling
+- **Isolated workspace**: Works in `/home/agent/workspace` with limited system access
+- **Clean environment**: All Nix-related variables are unset in the agent shell
+
+## Getting a Gemini API Key
+
+To use the Gemini CLI mixtape, you need a Google AI API key:
+
+1. Visit [Google AI Studio](https://aistudio.google.com/app/apikey)
+2. Sign in with your Google account
+3. Create a new API key
+4. Copy the key and set it as `GEMINI_API_KEY` or `GOOGLE_API_KEY`
+
+<Warning>
+Keep your API key secure. Never commit it to version control or share it publicly.
+</Warning>
+
+## Comparison with Other Mixtapes
+
+| Feature | Gemini CLI | Claude Code | OpenCode |
+|---------|-----------|-------------|----------|
+| Provider | Google | Anthropic | Anthropic or OpenAI |
+| API Key | `GEMINI_API_KEY` or `GOOGLE_API_KEY` | `ANTHROPIC_API_KEY` | `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` |
+| Binary | `gemini` | `claude` | `opencode` |
+| Configuration | None | None | `~/.config/opencode/config.json` |
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Running VMs" icon="rocket" href="/development/running-vms">
+    Deploy and run this mixtape
+  </Card>
+  <Card title="Create Custom Mixtape" icon="wrench" href="/mixtapes/creating-custom">
+    Build your own mixtape based on this one
+  </Card>
+</CardGroup>

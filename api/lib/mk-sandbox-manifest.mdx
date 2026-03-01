@@ -1,0 +1,148 @@
+---
+title: "mkSandboxManifest"
+description: "Pre-compute Nix store closure for gVisor sandbox profile"
+---
+
+The `mkSandboxManifest` function returns a NixOS module that pre-computes the Nix store closure for the gVisor sandbox profile at build time. This eliminates the need for agentd to run `nix-store -qR` at runtime when booting sandboxes.
+
+## Function Signature
+
+```nix
+mkSandboxManifest :: {} -> NixOS module
+```
+
+## Parameters
+
+None. The function takes an empty attrset `{}` as a placeholder parameter.
+
+## Returns
+
+A NixOS module that installs `/etc/stereos/sandbox-closure.txt` containing the full Nix store closure for the sandbox profile.
+
+## How It Works
+
+1. Reads `config.stereos.agent.basePackages` and `config.stereos.agent.extraPackages`
+2. Combines them into a single `buildEnv` derivation
+3. Uses `pkgs.closureInfo` to compute the full `/nix/store` closure at build time
+4. Installs the closure manifest to `/etc/stereos/sandbox-closure.txt`
+
+## Implementation
+
+From `lib/default.nix:19`:
+
+```nix
+mkSandboxManifest =
+  { }:
+  { config, lib, pkgs, ... }:
+  let
+    # Combine base agent packages with mixtape-specific packages
+    allPackages = config.stereos.agent.basePackages
+      ++ config.stereos.agent.extraPackages;
+
+    # Build a single environment from all packages
+    sandboxProfile = pkgs.buildEnv {
+      name = "stereos-sandbox-profile";
+      paths = allPackages;
+      pathsToLink = [ "/bin" "/lib" "/share" "/etc" ];
+    };
+
+    # Use closureInfo to compute the full /nix/store closure at build time
+    closureManifest = pkgs.closureInfo { rootPaths = [ sandboxProfile ]; };
+  in
+  {
+    # Install the closure manifest to a well-known path that agentd reads
+    environment.etc."stereos/sandbox-closure.txt" = {
+      source = "${closureManifest}/store-paths";
+      mode = "0444";
+    };
+  };
+```
+
+## Usage
+
+The function is automatically included by `mkMixtape` - you never need to call it directly:
+
+```nix lib/default.nix (mkMixtape implementation)
+mkMixtape = { name, features ? [], system ? "aarch64-linux", extraModules ? [] }:
+  inputs.nixpkgs.lib.nixosSystem {
+    inherit system;
+    modules = [
+      # ...
+      
+      # Pre-computed sandbox closure manifest (per-mixtape)
+      (mkSandboxManifest { })
+      
+      # ...
+    ] ++ features ++ extraModules;
+  };
+```
+
+## Manifest Format
+
+The generated `/etc/stereos/sandbox-closure.txt` contains one store path per line:
+
+```
+/nix/store/abc123...-bash-5.2.15
+/nix/store/def456...-coreutils-9.3
+/nix/store/ghi789...-git-2.41.0
+/nix/store/jkl012...-opencode-1.0.0
+...
+```
+
+## Runtime Behavior
+
+When agentd boots a gVisor sandbox:
+
+1. Reads `/etc/stereos/sandbox-closure.txt`
+2. Mounts each store path into the sandbox's rootfs
+3. No runtime Nix evaluation required - everything is pre-computed at build time
+
+## Why Pre-Compute?
+
+**Without pre-computation:**
+```bash
+# agentd would need to run this at runtime
+nix-store -qR /nix/store/abc123...-sandbox-profile
+# Takes 100-500ms, requires Nix daemon access
+```
+
+**With pre-computation:**
+```bash
+# agentd just reads the manifest
+cat /etc/stereos/sandbox-closure.txt
+# Takes <1ms, no Nix daemon needed
+```
+
+This is critical for fast sandbox boot times.
+
+## Per-Mixtape Manifests
+
+Each mixtape gets its own manifest specific to its package set:
+
+- `opencode-mixtape` → includes opencode + base packages
+- `claude-code-mixtape` → includes claude-code + base packages
+- `full-mixtape` → includes all agents + base packages
+
+The manifest is computed during the NixOS build and baked into the system image.
+
+## Example: Inspecting the Manifest
+
+```bash
+# Inside a stereOS VM
+cat /etc/stereos/sandbox-closure.txt | wc -l
+# 247 store paths
+
+cat /etc/stereos/sandbox-closure.txt | grep opencode
+# /nix/store/xyz789...-opencode-1.0.0
+```
+
+## Related
+
+- [stereos.agent.basePackages](/api/options/stereos-agent) - Base package set included in closure
+- [stereos.agent.extraPackages](/api/options/stereos-agent) - Mixtape-specific packages included in closure
+- [mkMixtape](/api/lib/mk-mixtape) - Automatically includes this function
+
+## Source Reference
+
+Function definition: `lib/default.nix:19`  
+Included by: `lib/default.nix:89` (mkMixtape)

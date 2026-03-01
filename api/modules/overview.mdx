@@ -1,0 +1,94 @@
+---
+title: "NixOS Modules Overview"
+description: "Core NixOS modules that compose stereOS"
+---
+
+stereOS is built from a collection of NixOS modules that define the system configuration, user accounts, and services. All modules are imported through `modules/default.nix` and are automatically included when using `mkMixtape`.
+
+## Module Organization
+
+The stereOS module tree is organized into three categories:
+
+### Base System Modules
+
+- **base.nix** - Core system configuration (filesystem, SSH, Nix settings, packages, hardening)
+- **boot.nix** - Boot configuration and optimizations for sub-3-second boot times
+
+### User Modules
+
+- **users/agent.nix** - Restricted agent user with curated package access
+- **users/admin.nix** - Full-access admin user with sudo privileges
+
+### Service Modules
+
+- **services/stereosd.nix** - stereOS-specific overrides for the stereosd control plane
+- **services/agentd.nix** - Agent process manager (tmux and gVisor sandboxes)
+
+## Module Imports
+
+All stereOS modules are aggregated in `modules/default.nix`:
+
+```nix modules/default.nix
+{
+  imports = [
+    ./base.nix
+    ./boot.nix
+    ./services/stereosd.nix
+    ./services/agentd.nix
+    ./users/agent.nix
+    ./users/admin.nix
+  ];
+}
+```
+
+When you use `mkMixtape`, these modules are automatically included in the system configuration.
+
+## Usage in Mixtapes
+
+Mixtape feature modules can configure stereOS by setting options defined in these modules:
+
+```nix mixtapes/opencode/base.nix
+{ config, lib, pkgs, ... }:
+
+{
+  # Add packages to the agent's PATH
+  stereos.agent.extraPackages = [ pkgs.opencode ];
+  
+  # Also available system-wide
+  environment.systemPackages = [ pkgs.opencode ];
+}
+```
+
+## Module Path
+
+All stereOS modules live in the `modules/` directory at the root of the repository:
+
+```
+modules/
+├── default.nix           # Aggregator (imports all sub-modules)
+├── base.nix              # Core OS configuration
+├── boot.nix              # Boot configuration
+├── services/
+│   ├── stereosd.nix      # stereosd service overrides
+│   └── agentd.nix        # agentd service overrides
+└── users/
+    ├── agent.nix         # Agent user with restricted shell
+    └── admin.nix         # Admin user with sudo
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Base Module" icon="shield" href="/api/modules/base">
+    Core system configuration and hardening
+  </Card>
+  <Card title="Boot Module" icon="bolt" href="/api/modules/boot">
+    Boot optimizations for fast startup
+  </Card>
+  <Card title="User Modules" icon="users" href="/api/modules/users">
+    Agent and admin user configuration
+  </Card>
+  <Card title="Service Modules" icon="server" href="/api/modules/services">
+    stereosd and agentd service definitions
+  </Card>
+</CardGroup>

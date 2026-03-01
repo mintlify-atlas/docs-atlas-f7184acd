@@ -1,80 +1,163 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Get a stereOS VM running in minutes
 ---
 
-## Get started in three steps
+Get stereOS running in minutes with this quickstart guide. You'll build a development image, launch a VM, and connect to it via SSH.
 
-Get your documentation site running locally and make your first customization.
+## Prerequisites
 
-### Step 1: Set up your local environment
+- Linux or macOS system
+- [Nix](https://nixos.org/download.html) installed with flakes enabled
+- QEMU (installed automatically via Nix dev shell)
+- 8GB RAM and 20GB disk space
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
+## Quick start
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/papercomputeco/stereOS.git
+    cd stereOS
+    ```
+  </Step>
+
+  <Step title="Enter the development shell">
+    The dev shell provides all build tools automatically:
     
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
+    ```bash
+    nix develop --impure
+    ```
     
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+    <Note>
+    If you have direnv installed, the shell will activate automatically when you cd into the directory.
+    </Note>
+  </Step>
 
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
+  <Step title="Build the development image">
+    Build the OpenCode mixtape with SSH key injection:
     
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    ```bash
+    make build-qcow2 MIXTAPE=opencode-mixtape-dev
+    ```
+    
+    This creates `result/stereos.qcow2` (approximately 2-4GB). First build takes 10-15 minutes.
+  </Step>
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+  <Step title="Build kernel artifacts">
+    For fast boot, build the kernel artifacts:
+    
+    ```bash
+    make build-kernel MIXTAPE=opencode-mixtape-dev
+    ```
+    
+    This creates `result-kernel/` with bzImage, initrd, and cmdline.
+  </Step>
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+  <Step title="Launch the VM">
+    ```bash
+    make run
+    ```
+    
+    The VM boots in 2-3 seconds using direct kernel boot. You'll see the stereOS ASCII art banner:
+    
+    ```
+     ______   ______  ______   ______   ______   ______   ______
+    /\  ___\ /\__  _\/\  ___\ /\  == \ /\  ___\ /\  __ \ /\  ___\
+    \ \___  \\/_/\ \/\ \  __\ \ \  __< \ \  __\ \ \ \/\ \\ \___  \
+     \/\_____\  \ \_\ \ \_____\\ \_\ \_\\ \_____\\ \_____\\/\_____\
+      \/_____/   \/_/  \/_____/ \/_/ /_/ \/_____/ \/_____/ \/_____/
+    
+        Mixtape: opencode-mixtape
+    ```
+  </Step>
 
-### Step 3: Go live
+  <Step title="SSH into the VM">
+    In a new terminal, connect as the admin user:
+    
+    ```bash
+    make ssh-admin
+    ```
+    
+    Or connect as the agent user:
+    
+    ```bash
+    make ssh-agent
+    ```
+    
+    <Info>
+    The dev build automatically injects your SSH key from `~/.config/stereos/ssh-key.pub`.
+    </Info>
+  </Step>
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+  <Step title="Run an AI agent">
+    Once connected as the agent user, run OpenCode:
+    
+    ```bash
+    # Set your API key
+    export ANTHROPIC_API_KEY="your-key-here"
+    
+    # Run OpenCode
+    opencode
+    ```
+    
+    The agent runs in a restricted environment with limited package access and no Nix daemon access.
+  </Step>
+</Steps>
+
+## What you built
+
+The development build includes:
+
+- **OpenCode agent** - AI coding assistant binary
+- **SSH key injection** - Your SSH key from `~/.config/stereos/ssh-key.pub`
+- **Two users**:
+  - `admin` - Full system access with sudo
+  - `agent` - Restricted shell, limited packages, no Nix access
+- **Two daemons**:
+  - `stereosd` - System lifecycle and control plane
+  - `agentd` - Agent process management
+
+## Common make targets
+
+| Target | Description |
+|--------|-------------|
+| `make build` | Build raw EFI image |
+| `make build-qcow2` | Build QCOW2 image |
+| `make build-kernel` | Build kernel artifacts |
+| `make run` | Launch VM with QEMU |
+| `make ssh-admin` | SSH as admin user |
+| `make ssh-agent` | SSH as agent user |
+| `make dist` | Build all formats with compression |
+
+## Environment variables
+
+Customize builds with environment variables:
+
+```bash
+# Build a different mixtape
+make build MIXTAPE=claude-code-mixtape-dev
+
+# Change architecture
+make build ARCH=x86_64-linux
+
+# Use a different SSH port
+make run SSH_PORT=3333
+```
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Architecture" icon="sitemap" href="/concepts/architecture">
+    Learn how stereOS is structured
+  </Card>
+  <Card title="Security Model" icon="shield" href="/concepts/security">
+    Understand the isolation layers
+  </Card>
+  <Card title="Mixtapes" icon="box" href="/mixtapes/overview">
+    Explore available agent configurations
+  </Card>
+  <Card title="Configuration" icon="gear" href="/development/configuration">
+    Customize your stereOS build
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

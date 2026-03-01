@@ -1,0 +1,460 @@
+---
+title: Security Model
+description: Security hardening and isolation mechanisms in stereOS
+---
+
+# Security Model
+
+stereOS implements defense-in-depth security through multiple layers of isolation, hardening, and privilege separation. The security model assumes the AI agent is untrusted and potentially adversarial.
+
+## Threat Model
+
+stereOS is designed to protect against:
+
+- **Package installation** by the agent (installing malware, backdoors)
+- **System modification** (tampering with OS configuration)
+- **Privilege escalation** (gaining root or admin access)
+- **Lateral movement** (escaping the agent user's sandbox)
+- **Data exfiltration** via filesystem access
+- **Resource exhaustion** attacks
+- **Container escape** (when using gVisor sandboxing)
+
+<Warning>
+stereOS is NOT designed to protect against adversarial prompts or social engineering attacks against the AI model itself. The security model focuses on OS-level isolation.
+</Warning>
+
+## Layer 1: User Isolation
+
+### The Agent User
+
+The agent runs as the `agent` user with strict restrictions:
+
+**Denied capabilities:**
+- ❌ No sudo access (explicitly denied)
+- ❌ No Nix daemon access
+- ❌ No wheel group membership
+- ❌ No access to system sockets outside `/run/agentd/`
+
+From `~/workspace/source/modules/users/agent.nix:148-155`:
+```nix
+security.sudo = {
+  enable = true;
+  extraConfig = ''
+    # Explicitly deny ALL sudo access for the agent user.
+    # This must come BEFORE any permissive rules.
+    agent ALL=(ALL:ALL) !ALL
+  '';
+};
+```
+
+**Restricted shell:**
+
+The agent's shell unsets all Nix-related environment variables and sets PATH to only approved binaries:
+
+From `~/workspace/source/modules/users/agent.nix:34-53`:
+```nix
+# Set PATH to only approved binaries + feature tool binaries
+export PATH="${agentEnv}/bin:${extraEnv}/bin"
+
+# Ensure TLS certificates work
+export SSL_CERT_FILE="${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+
+# Nuke all Nix-related environment variables
+unset NIX_PATH NIX_REMOTE NIX_CONF_DIR NIX_USER_CONF_FILES
+unset NIX_PROFILES NIX_STORE
+```
+
+### Nix Daemon Restrictions
+
+The **primary isolation mechanism** is denying the agent access to the Nix daemon:
+
+From `~/workspace/source/modules/base.nix:67-76`:
+```nix
+nix.settings = {
+  experimental-features = [ "nix-command" "flakes" ];
+  auto-optimise-store = true;
+
+  # CRITICAL: Only root and wheel can talk to the Nix daemon.
+  # The 'agent' user is explicitly excluded — this is the primary
+  # mechanism that prevents the AI agent from using nix tooling.
+  allowed-users = [ "root" "@wheel" ];
+  trusted-users = [ "root" ];
+};
+```
+
+<Info>
+Even if the agent somehow gains access to nix binaries, the Nix daemon will reject all operations because the agent user is not in `allowed-users`.
+</Info>
+
+### Immutable Users
+
+From `~/workspace/source/modules/boot.nix:155-157`:
+```nix
+# Immutable user database: no passwd/shadow writes at boot
+users.mutableUsers = false;
+```
+
+This prevents runtime modification of users, passwords, or group memberships.
+
+## Layer 2: Kernel Hardening
+
+stereOS enables multiple kernel-level security features:
+
+From `~/workspace/source/modules/base.nix:105-123`:
+```nix
+boot.kernel.sysctl = {
+  # Restrict process tracing (blocks ptrace-based attacks)
+  "kernel.yama.ptrace_scope" = 2;
+
+  # Hide kernel pointers from non-root
+  "kernel.kptr_restrict" = 2;
+
+  # Restrict dmesg to root
+  "kernel.dmesg_restrict" = 1;
+
+  # Disable core dumps via pipe
+  "kernel.core_pattern" = "|/bin/false";
+
+  # Network hardening
+  "net.ipv4.conf.all.accept_redirects" = 0;
+  "net.ipv4.conf.default.accept_redirects" = 0;
+  "net.ipv6.conf.all.accept_redirects" = 0;
+  "net.ipv4.conf.all.send_redirects" = 0;
+};
+```
+
+### What These Settings Do
+
+| Setting | Value | Protection |
+|---------|-------|------------|
+| `ptrace_scope` | 2 | Prevents any process from using ptrace except during execve (blocks debugger-based attacks) |
+| `kptr_restrict` | 2 | Hides kernel pointers from non-root users (mitigates kernel exploits) |
+| `dmesg_restrict` | 1 | Restricts kernel log access to root only (prevents information leakage) |
+| `core_pattern` | `/bin/false` | Disables core dumps that could leak sensitive memory contents |
+| ICMP redirects | 0 | Prevents network-based MITM attacks |
+
+<Note>
+`ptrace_scope=2` means even root cannot ptrace arbitrary processes. Only parent processes can ptrace their children during exec. This is the strictest setting.
+</Note>
+
+## Layer 3: Filesystem Isolation
+
+### Ephemeral /tmp
+
+From `~/workspace/source/modules/base.nix:125-126`:
+```nix
+# Ensure /tmp is tmpfs (ephemeral, never written to disk)
+boot.tmp.useTmpfs = true;
+```
+
+All temporary files exist only in RAM and are cleared on shutdown.
+
+### Secrets Management
+
+Secrets are stored in a dedicated tmpfs directory:
+
+From `~/workspace/source/modules/services/stereosd.nix:33-36`:
+```nix
+systemd.tmpfiles.rules = [
+  "d /run/stereos 0750 root admin -"
+  "d /run/stereos/secrets 0700 root root -"
+];
+```
+
+**Secret access model:**
+- `/run/stereos/secrets/` is mode `0700`, owned by `root:root`
+- Only root can read/write secrets
+- Admin user CANNOT access secrets (only daemon sockets)
+- Secrets are never persisted to disk images
+
+### Workspace Isolation
+
+The agent's writable directory:
+
+From `~/workspace/source/modules/users/agent.nix:143-145`:
+```nix
+systemd.tmpfiles.rules = [
+  "d /home/agent/workspace 0755 agent agent -"
+];
+```
+
+- Agent can only write to `/home/agent/workspace` and `/tmp`
+- Rest of the filesystem is read-only (managed by Nix)
+- Workspace can be a host-shared directory (9p/virtiofs) or ephemeral
+
+## Layer 4: Network Isolation
+
+### Firewall Rules
+
+From `~/workspace/source/modules/base.nix:99-102`:
+```nix
+networking.firewall = {
+  enable = true;
+  allowedTCPPorts = [ 22 ];  # SSH only
+};
+```
+
+In the production image:
+- Only SSH (port 22) is open for admin access
+- stereosd control plane (port 1024) is added in `modules/services/stereosd.nix`
+- All other inbound ports are blocked
+
+### SSH Hardening
+
+From `~/workspace/source/modules/base.nix:51-58`:
+```nix
+services.openssh = {
+  enable = true;
+  settings = {
+    PasswordAuthentication = false;
+    PermitRootLogin = "no";
+    KbdInteractiveAuthentication = false;
+  };
+};
+```
+
+- Public key authentication ONLY
+- Root login explicitly disabled
+- No password or keyboard-interactive auth
+
+<Warning>
+Production images have NO baked-in SSH keys. Keys are injected ephemerally at boot time by stereosd over vsock.
+</Warning>
+
+From `~/workspace/source/modules/base.nix:61-64`:
+```nix
+# stereOS images are built without baked-in SSH keys or passwords.
+# SSH authorized keys are ephemerally injected at VM boot time by stereosd
+# over vsock.
+users.allowNoPasswordLogin = true;
+```
+
+## Layer 5: gVisor Sandboxing (Optional)
+
+For maximum isolation, agents can run inside gVisor sandboxes managed by agentd.
+
+### What is gVisor?
+
+gVisor (`runsc`) is a user-space kernel that implements Linux syscalls without directly invoking the host kernel. It provides:
+
+- **Syscall interception** - All agent syscalls go through gVisor's user-space kernel
+- **Resource limits** - CPU, memory, file descriptors
+- **Network sandboxing** - Virtual networking isolated from the host
+- **Filesystem isolation** - Separate mount namespace with bind-mounted Nix store
+
+From `~/workspace/source/modules/base.nix:79-92`:
+```nix
+environment.systemPackages = with pkgs; [
+  # ... other packages ...
+  gvisor  # runsc: gVisor sandbox runtime for sandboxed agents
+];
+```
+
+### Sandbox Runtime Directories
+
+From `~/workspace/source/modules/services/agentd.nix:32-36`:
+```nix
+systemd.tmpfiles.rules = [
+  "d /run/agentd 0750 agent admin -"
+  "d /run/agentd/sandboxes 0750 root admin -"       # OCI bundles
+  "d /run/agentd/runsc-state 0750 root admin -"     # runsc container state
+];
+```
+
+### Sandbox vs Native Mode
+
+**Native mode (tmux):**
+- Agent runs as the `agent` user directly
+- Uses the restricted shell and PATH
+- Admin can `tmux attach` to inspect
+- Lower overhead, simpler debugging
+
+**Sandboxed mode (gVisor):**
+- Agent runs inside a gVisor container
+- Additional syscall filtering and isolation
+- Admin uses `runsc exec` to inspect
+- Higher security at the cost of some performance
+
+<Info>
+Both modes enforce the same Nix daemon restrictions. gVisor adds an additional layer of syscall-level isolation on top of the user-based isolation.
+</Info>
+
+## Layer 6: Service Hardening
+
+### stereosd Security
+
+From `~/workspace/source/modules/services/stereosd.nix:55-65`:
+```nix
+serviceConfig = {
+  # Override: stereosd needs to run as root because it must:
+  #   - Bind to AF_VSOCK sockets
+  #   - Mount/unmount shared filesystems (CAP_SYS_ADMIN)
+  #   - Write secrets to /run/stereos/secrets (root-owned)
+  #   - Initiate system poweroff during shutdown
+  DynamicUser = lib.mkForce false;
+
+  Restart = lib.mkForce "on-failure";
+  RestartSec = 5;
+};
+```
+
+stereosd runs as root but:
+- Only listens on vsock (CID:3, port 1024) or localhost TCP
+- Validates all control plane messages
+- Limits secret file permissions to `0600 root:root`
+
+### agentd Security
+
+From `~/workspace/source/modules/services/agentd.nix:50-58`:
+```nix
+serviceConfig = {
+  # Override: disable DynamicUser in favour of stereOS's own user model.
+  # agentd runs as root so it can manage tmux sessions for the agent
+  # user (native mode) and runsc containers (sandboxed mode).
+  DynamicUser = lib.mkForce false;
+
+  Restart = lib.mkForce "on-failure";
+  RestartSec = 5;
+};
+```
+
+agentd runs as root but:
+- Manages agent processes via tmux (su to agent user) or gVisor (rootless containers)
+- Only accepts commands from stereosd over Unix socket
+- Enforces resource limits on agent processes
+
+## Layer 7: VM Boundary Isolation
+
+The ultimate isolation layer is the VM itself:
+
+**Hardware virtualization:**
+- Agent runs inside a VM (QEMU, Firecracker, Apple Virtualization.framework)
+- Host controls all network, storage, and device access
+- VM cannot directly access host resources
+
+**Control plane isolation:**
+- Host communicates with guest over virtio-vsock or TCP
+- No shared memory or direct hardware access
+- Guest cannot initiate connections to arbitrary hosts (controlled by SLIRP/vmnet)
+
+<Note>
+Even if an agent achieves root inside the VM, it is still contained by the hypervisor and cannot escape to the host without a hypervisor exploit.
+</Note>
+
+## Security Best Practices
+
+When deploying stereOS:
+
+### 1. Never Use Dev Images in Production
+
+Dev images include SSH keys from your development machine:
+
+```bash
+# DON'T do this in production
+nix build .#opencode-mixtape-dev
+
+# DO this instead
+nix build .#opencode-mixtape
+```
+
+### 2. Rotate API Keys Frequently
+
+API keys are injected at runtime via stereosd. Rotate them regularly:
+
+```bash
+# In jcard.toml
+[env]
+ANTHROPIC_API_KEY = "sk-ant-new-key"
+```
+
+### 3. Use Shared Directories Carefully
+
+Only mount directories the agent needs:
+
+```toml
+# jcard.toml
+[[shared]]
+guest = "/home/agent/workspace"
+host = "./workspace"
+readonly = false  # Only if the agent needs write access
+```
+
+<Warning>
+Never mount sensitive host directories like `/etc`, `/root`, or your home directory into the agent VM.
+</Warning>
+
+### 4. Monitor Agent Behavior
+
+Admin users can inspect running agents:
+
+```bash
+# Native mode: attach to tmux
+sudo tmux -S /run/agentd/agentd-tmux.sock attach
+
+# Sandboxed mode: exec into container
+sudo runsc --root /run/agentd/runsc-state exec <container-id> /bin/bash
+```
+
+### 5. Use Resource Limits
+
+Configure VM resource limits in your hypervisor:
+
+```bash
+# QEMU example
+qemu-system-aarch64 \
+  -m 2G \
+  -smp 2 \
+  -cpu max \
+  # ...
+```
+
+This prevents resource exhaustion attacks.
+
+### 6. Enable Audit Logging
+
+Consider adding auditd or journald forwarding for compliance:
+
+```nix
+# In your custom mixtape
+services.journald.forwardToSyslog = true;
+```
+
+## Known Limitations
+
+stereOS security model does NOT protect against:
+
+- **Prompt injection attacks** against the AI model
+- **Side-channel attacks** (timing, cache)
+- **Hypervisor exploits** (QEMU/KVM vulnerabilities)
+- **Supply chain attacks** in the AI agent binary itself
+- **Data exfiltration via API calls** made by the agent (this is model-dependent)
+
+<Info>
+stereOS focuses on OS-level isolation. Application-level security (like prompt filtering or output validation) must be implemented by the AI agent itself.
+</Info>
+
+## Security Audit
+
+Key security-critical files to review:
+
+- `modules/base.nix` - Kernel hardening, Nix daemon restrictions
+- `modules/users/agent.nix` - Restricted shell, sudo denial
+- `modules/services/stereosd.nix` - Secret handling, file permissions
+- `modules/services/agentd.nix` - Agent process management
+
+All security configurations are declared in Nix and are auditable in the source repository.
+
+## Reporting Security Issues
+
+If you discover a security vulnerability in stereOS:
+
+1. **DO NOT** open a public GitHub issue
+2. Email security@stereos.ai with details
+3. Include steps to reproduce if possible
+4. Allow reasonable time for a patch before disclosure
+
+## Next Steps
+
+- Review [System Components](/concepts/system-components) to understand privilege boundaries
+- Learn about [Mixtapes](/concepts/mixtapes) and package management
+- Explore the [Architecture](/concepts/architecture) overview

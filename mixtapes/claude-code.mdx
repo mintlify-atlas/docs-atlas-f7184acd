@@ -1,0 +1,152 @@
+---
+title: Claude Code Mixtape
+description: stereOS with Anthropic's Claude Code CLI agent
+---
+
+The Claude Code mixtape includes Anthropic's official [Claude Code](https://claude.ai) CLI coding agent, providing terminal-based AI assistance powered by Claude.
+
+## Overview
+
+**Agent binary**: `claude`  
+**Package**: `pkgs.claude-code` (nixpkgs-unstable)  
+**Mixtape name**: `claude-code-mixtape`
+
+## Configuration
+
+The Claude Code mixtape is defined in `mixtapes/claude-code/base.nix`:
+
+```nix
+{ config, lib, pkgs, ... }:
+
+{
+  # Add claude-code to the agent's restricted PATH
+  stereos.agent.extraPackages = [ pkgs.claude-code ];
+
+  # Also make it available system-wide (for admin use)
+  environment.systemPackages = [ pkgs.claude-code ];
+
+  # Disable auto-update (already set by the Nix package)
+  environment.variables.DISABLE_AUTOUPDATER = "1";
+}
+```
+
+## Required Environment Variables
+
+Claude Code requires an Anthropic API key:
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+<Warning>
+You **must** set `ANTHROPIC_API_KEY` before running the `claude` command. The agent will not function without a valid API key.
+</Warning>
+
+## Usage
+
+Once deployed, connect to your stereOS instance and run:
+
+```bash
+claude
+```
+
+The agent user has Claude Code pre-configured and ready to use in the `/home/agent/workspace` directory.
+
+## Auto-Update Disabled
+
+The mixtape explicitly disables Claude Code's auto-update mechanism by setting `DISABLE_AUTOUPDATER=1`. This ensures:
+
+- **Reproducibility**: The exact version installed by Nix is what runs
+- **Security**: No unexpected code execution from automatic updates
+- **Stability**: Updates are controlled through NixOS configuration
+
+To update Claude Code, update the nixpkgs input and rebuild the mixtape.
+
+## Available Tools
+
+The agent user's PATH includes Claude Code plus these base packages:
+
+- **Core utilities**: `coreutils`, `grep`, `sed`, `awk`, `find`, `diff`, `less`
+- **Development**: `git`, `curl`, `jq`, `ripgrep`, `tree`, `make`
+- **Editors**: `vim`
+- **Terminal**: `tmux`
+- **Monitoring**: `htop`, `ps`, `top`
+- **Networking**: `ssh`, TLS certificates
+
+## Building the Mixtape
+
+The Claude Code mixtape is defined in `flake.nix`:
+
+```nix
+nixosConfigurations = {
+  # Production configuration
+  claude-code-mixtape = stereos-lib.mkMixtape {
+    name = "claude-code-mixtape";
+    features = [ ./mixtapes/claude-code/base.nix ];
+  };
+
+  # Dev configuration (with SSH key injection)
+  claude-code-mixtape-dev = stereos-lib.mkMixtape {
+    name = "claude-code-mixtape";
+    features = [ ./mixtapes/claude-code/base.nix ];
+    extraModules = [ ./profiles/dev.nix ];
+  };
+};
+```
+
+### Build Commands
+
+<CodeGroup>
+```bash Production Image
+# Build raw EFI image
+nix build .#nixosConfigurations.claude-code-mixtape.config.system.build.raw
+
+# Build QCOW2 image
+nix build .#nixosConfigurations.claude-code-mixtape.config.system.build.qcow2
+```
+
+```bash Development Image
+# Build with SSH key injection
+nix build .#nixosConfigurations.claude-code-mixtape-dev.config.system.build.raw
+```
+
+```bash Using Makefile
+# Build all formats
+make claude-code-mixtape
+
+# Build dev variant
+make claude-code-mixtape-dev
+```
+</CodeGroup>
+
+## Security Features
+
+The agent user in this mixtape:
+
+- **Cannot use sudo**: Explicitly denied all sudo access
+- **Restricted PATH**: Only approved binaries are accessible
+- **No Nix access**: Cannot run `nix`, `nixos-rebuild`, or other Nix tooling
+- **Isolated workspace**: Works in `/home/agent/workspace` with limited system access
+- **Clean environment**: All Nix-related variables are unset in the agent shell
+- **No auto-updates**: Update mechanism is disabled for security and reproducibility
+
+## Comparison with OpenCode
+
+| Feature | Claude Code | OpenCode |
+|---------|------------|----------|
+| Provider | Anthropic only | Anthropic or OpenAI |
+| API Key | `ANTHROPIC_API_KEY` | `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` |
+| Binary | `claude` | `opencode` |
+| Configuration | None (uses API directly) | `~/.config/opencode/config.json` |
+| Auto-update | Disabled in stereOS | N/A |
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Running VMs" icon="rocket" href="/development/running-vms">
+    Deploy and run this mixtape
+  </Card>
+  <Card title="Create Custom Mixtape" icon="wrench" href="/mixtapes/creating-custom">
+    Build your own mixtape based on this one
+  </Card>
+</CardGroup>

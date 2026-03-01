@@ -1,0 +1,83 @@
+---
+title: Mixtapes
+description: Pre-configured stereOS images with AI coding agents
+---
+
+stereOS produces machine images called **mixtapes** that bundle a hardened, minimal Linux system with specific AI agent harnesses. Each mixtape is a complete, bootable system image ready to run AI coding agents in a secure, isolated environment.
+
+## Available Mixtapes
+
+<CardGroup cols={2}>
+  <Card title="OpenCode" icon="code" href="/mixtapes/opencode">
+    OpenCode terminal AI coding agent with Claude or OpenAI
+  </Card>
+  <Card title="Claude Code" icon="robot" href="/mixtapes/claude-code">
+    Anthropic's official CLI coding agent
+  </Card>
+  <Card title="Gemini CLI" icon="google" href="/mixtapes/gemini-cli">
+    Google's AI coding agent
+  </Card>
+  <Card title="Full" icon="layer-group" href="/mixtapes/full">
+    All AI coding agents in one image
+  </Card>
+</CardGroup>
+
+## What's in a Mixtape?
+
+Each mixtape includes:
+
+- **Hardened Linux base**: Minimal NixOS system optimized for security and fast boot times (sub-3 second boot target)
+- **Agent user**: Restricted user account with curated tools and no sudo access
+- **AI agent binary**: Pre-installed and configured coding agent(s)
+- **System daemons**: `stereosd` (control plane) and `agentd` (lifecycle management)
+- **Secure isolation**: gVisor sandbox support for additional isolation layers
+
+## Quick Comparison
+
+| Mixtape | Agent Binary | Required API Key | Package |
+|---------|-------------|------------------|----------|
+| `opencode-mixtape` | `opencode` | `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` | `pkgs.opencode` |
+| `claude-code-mixtape` | `claude` | `ANTHROPIC_API_KEY` | `pkgs.claude-code` |
+| `gemini-cli-mixtape` | `gemini` | `GEMINI_API_KEY` or `GOOGLE_API_KEY` | `pkgs.gemini-cli` |
+| `full-mixtape` | All of the above | All of the above | All packages |
+
+## How Mixtapes Work
+
+Mixtapes are built using the `mkMixtape` function from `lib/default.nix`. Each mixtape:
+
+1. **Inherits the base system**: All mixtapes include the core stereOS modules and hardened base profile
+2. **Adds agent packages**: Specific AI agent binaries are added to `stereos.agent.extraPackages`
+3. **Configures environment**: Each agent's required environment variables and configuration files are set up
+4. **Generates sandbox closure**: Pre-computes the Nix store closure for fast gVisor sandbox boot
+
+The agent user's PATH includes:
+- Base packages: `git`, `curl`, `jq`, `vim`, `tmux`, `ripgrep`, and more
+- Mixtape-specific packages: The AI coding agent(s) defined in the mixtape
+
+## Development vs Production
+
+Each mixtape has two variants:
+
+- **Production** (`opencode-mixtape`): No SSH keys baked in, ready for secure deployment
+- **Development** (`opencode-mixtape-dev`): Includes `profiles/dev.nix` which injects your SSH key from `~/.config/stereos/ssh-key.pub` for local testing
+
+## Image Formats
+
+All mixtapes are available in multiple formats:
+
+| Format | Build Attribute | Output | Use Case |
+|--------|----------------|--------|----------|
+| Raw EFI | `system.build.raw` | `stereos.img` | Canonical artifact, Apple Virt Framework bootable |
+| QCOW2 | `system.build.qcow2` | `stereos.qcow2` | QEMU/KVM virtual machines |
+| Kernel artifacts | `system.build.kernelArtifacts` | `bzImage`, `initrd`, `cmdline` | Direct-kernel boot (bypasses UEFI/GRUB) |
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Create Custom Mixtape" icon="wrench" href="/mixtapes/creating-custom">
+    Learn how to build your own mixtape
+  </Card>
+  <Card title="Download Images" icon="download" href="https://stereos.ai/download">
+    Download pre-built mixtape images
+  </Card>
+</CardGroup>

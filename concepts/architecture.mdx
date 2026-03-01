@@ -1,0 +1,260 @@
+---
+title: System Architecture
+description: Overview of stereOS architecture and components
+---
+
+# System Architecture
+
+stereOS is a Linux-based operating system built on NixOS, hardened and purpose-built for AI agents. The system follows a layered architecture designed for security, isolation, and rapid boot times.
+
+## High-Level Overview
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    Host System                       │
+│  ┌───────────────────────────────────────────────┐  │
+│  │           stereOS Guest (Mixtape)             │  │
+│  │                                               │  │
+│  │  ┌──────────────┐      ┌──────────────┐      │  │
+│  │  │   stereosd   │◄────►│   agentd     │      │  │
+│  │  │ (lifecycle)  │ unix │ (agent mgmt) │      │  │
+│  │  └──────┬───────┘ sock └──────┬───────┘      │  │
+│  │         │                      │              │  │
+│  │         │ vsock                │              │  │
+│  │         ▼                      ▼              │  │
+│  │  ┌──────────────┐      ┌──────────────┐      │  │
+│  │  │ admin user   │      │ agent user   │      │  │
+│  │  │ (full access)│      │ (restricted) │      │  │
+│  │  └──────────────┘      └──────────────┘      │  │
+│  └───────────────────────────────────────────────┘  │
+│         ▲                                            │
+│         │ virtio-vsock / TCP                         │
+└─────────┼────────────────────────────────────────────┘
+          │
+    Control Plane
+```
+
+## Core Components
+
+stereOS consists of four primary components:
+
+### 1. Base System
+
+The base system (`modules/base.nix`) provides:
+
+- **Minimal NixOS foundation** with QEMU guest optimizations
+- **Hardened kernel settings** for security isolation
+- **Essential system packages** (git, vim, curl, jq, ripgrep, gVisor)
+- **SSH server** with key-based authentication only
+- **Firewall** allowing only SSH (port 22) and stereosd control plane (port 1024)
+
+From `~/workspace/source/modules/base.nix:21-29`:
+```nix
+environment.etc."os-release".text = lib.mkForce ''
+  NAME="stereOS"
+  ID=stereos
+  ID_LIKE=nixos
+  VERSION="${config.system.nixos.version}"
+  PRETTY_NAME="stereOS (${config.networking.hostName})"
+  HOME_URL="https://github.com/paper-compute-co"
+'';
+```
+
+### 2. stereosd (System Daemon)
+
+The lifecycle and control plane daemon (`modules/services/stereosd.nix`):
+
+- **Host-guest communication** via virtio-vsock (CID:3, port 1024) or TCP fallback
+- **Shared directory mounting** (virtio-fs / 9p)
+- **Secret injection** to tmpfs-backed paths (`/run/stereos/secrets/`)
+- **Graceful shutdown coordination**
+- **Unix socket** for agentd communication (`/run/stereos/stereosd.sock`)
+
+<Info>
+stereosd runs as root because it needs CAP_SYS_ADMIN for mounting filesystems, binding to vsock sockets, and writing secrets.
+</Info>
+
+From `~/workspace/source/modules/services/stereosd.nix:33-36`:
+```nix
+systemd.tmpfiles.rules = [
+  "d /run/stereos 0750 root admin -"
+  "d /run/stereos/secrets 0700 root root -"
+];
+```
+
+### 3. agentd (Agent Management Daemon)
+
+The agent process manager (`modules/services/agentd.nix`) handles:
+
+- **Agent lifecycle management** via tmux sessions (native mode) or gVisor sandboxes
+- **Process supervision** with restart on failure
+- **Admin introspection** via tmux attach or runsc exec
+- **Dependency on stereosd** for secrets and control plane
+
+agentd starts AFTER stereosd and requires it to be running:
+
+From `~/workspace/source/modules/services/agentd.nix:40-43`:
+```nix
+after = [ "stereosd.service" ];
+requires = [ "stereosd.service" ];
+```
+
+### 4. User Model
+
+Two-tier user system for privilege separation:
+
+**Admin user** (`modules/users/admin.nix`):
+- Full system access via sudo (passwordless)
+- Member of `wheel` and `admin` groups
+- Can access daemon sockets and tmux sessions
+- SSH access with authorized keys
+
+**Agent user** (`modules/users/agent.nix`):
+- Restricted shell with curated PATH
+- Workspace directory at `/home/agent/workspace`
+- Explicitly denied sudo access
+- Cannot use Nix tooling (primary isolation mechanism)
+
+<Warning>
+The agent user is explicitly excluded from Nix daemon access. This prevents the AI agent from modifying the system, installing packages, or accessing the Nix store directly.
+</Warning>
+
+## Boot Architecture
+
+stereOS uses a heavily optimized boot sequence (`modules/boot.nix`) targeting sub-3-second boot:
+
+### UEFI Boot Flow
+
+1. **GRUB EFI bootloader** at `/EFI/BOOT/BOOTAA64.EFI` (aarch64)
+2. **Systemd-based initrd** for parallelized initialization
+3. **Virtio kernel modules** only (minimal hardware probing)
+4. **systemd-networkd** with DHCP on ethernet
+5. **Boot complete marker** written to `/run/stereos-ready`
+
+From `~/workspace/source/modules/boot.nix:56-57`:
+```nix
+# Systemd-based initrd: replaces NixOS's sequential bash stage-1 with a
+# parallelized systemd initrd.  Expected savings: 1-3 s.
+boot.initrd.systemd.enable = true;
+```
+
+### Serial Console Configuration
+
+From `~/workspace/source/modules/boot.nix:36-42`:
+```nix
+# ttyAMA0  — PL011 UART on QEMU's virt machine (aarch64 -serial)
+# hvc0     — virtio console on Apple Virtualization.framework
+# tty0     — virtual terminal (active when a display is attached)
+boot.kernelParams = lib.mkMerge [
+  (lib.mkBefore [ "quiet" "loglevel=0" ])
+  [ "console=tty0" "console=ttyAMA0,115200" "console=hvc0" ]
+];
+```
+
+## Communication Channels
+
+### virtio-vsock Transport
+
+The primary control plane uses AF_VSOCK for host-guest communication:
+
+- **CID:3, port 1024** for stereosd listener
+- **Kernel modules** force-loaded: `vmw_vsock_virtio_transport`
+- **Available on** QEMU/KVM, Firecracker
+- **Fallback to TCP** when vsock unavailable (macOS HVF)
+
+From `~/workspace/source/modules/boot.nix:85-88`:
+```nix
+# Force-load vsock transport in the real root so it is available before
+# stereosd starts.
+boot.kernelModules = [ "vmw_vsock_virtio_transport" ];
+```
+
+### Unix Sockets
+
+Internal daemon communication uses Unix domain sockets:
+
+- `/run/stereos/stereosd.sock` - stereosd control interface
+- `/run/agentd/agentd.sock` - agentd control interface (planned)
+- `/run/agentd/agentd-tmux.sock` - tmux session socket for agent
+
+All sockets are group-owned by `admin` for administrative access.
+
+## Image Formats
+
+Every mixtape produces three bootable formats:
+
+| Format | File | Use Case |
+|--------|------|----------|
+| Raw EFI | `stereos.img` | Apple Virtualization Framework, canonical artifact |
+| QCOW2 | `stereos.qcow2` | QEMU/KVM (derived from raw) |
+| Kernel artifacts | `bzImage`, `initrd`, `cmdline` | Direct-kernel boot (bypasses UEFI) |
+
+From `~/workspace/source/profiles/base.nix:16-21`:
+```nix
+imports = [
+  ../formats/raw-efi.nix
+  ../formats/qcow.nix
+  ../formats/kernel-artifacts.nix
+];
+```
+
+## Build System Architecture
+
+stereOS uses Nix flakes with flake-parts for modular configuration:
+
+```
+flake.nix (entry point)
+├── flake/devshell.nix    → Developer environment
+├── flake/images.nix      → Image build targets
+└── flake/checks.nix      → CI verification
+
+modules/                  → NixOS modules (OS core)
+├── base.nix
+├── boot.nix
+├── services/
+│   ├── stereosd.nix
+│   └── agentd.nix
+└── users/
+    ├── agent.nix
+    └── admin.nix
+
+mixtapes/                 → Agent-specific configs
+├── opencode/
+├── claude-code/
+└── full/
+```
+
+All mixtapes are assembled by `lib/default.nix:mkMixtape`, which combines:
+
+1. External flake modules (agentd, stereosd)
+2. stereOS module tree
+3. Base profile (image formats)
+4. Mixtape-specific features
+5. Sandbox closure manifest
+
+<Info>
+See [System Components](/concepts/system-components) for detailed information about stereosd, agentd, and the user model.
+</Info>
+
+## Runtime Directories
+
+All runtime state lives in tmpfs (never persisted to disk):
+
+```
+/tmp                           → tmpfs (boot.tmp.useTmpfs = true)
+/run/stereos/                  → 0750 root:admin
+/run/stereos/secrets/          → 0700 root:root
+/run/agentd/                   → 0750 agent:admin
+/run/agentd/sandboxes/         → 0750 root:admin (OCI bundles)
+/run/agentd/runsc-state/       → 0750 root:admin (gVisor state)
+```
+
+<Note>
+The `/tmp` filesystem is explicitly configured as tmpfs to ensure no temporary files are ever written to disk. This is a security measure to prevent data leakage.
+</Note>
+
+## Next Steps
+
+- Learn about [Mixtapes](/concepts/mixtapes) and how to customize them
+- Understand the [Security Model](/concepts/security)
+- Explore [System Components](/concepts/system-components) in detail

@@ -1,0 +1,208 @@
+---
+title: "mkMixtape"
+description: "Build a complete NixOS system configuration (mixtape)"
+---
+
+The `mkMixtape` function is the primary interface for building stereOS system configurations. It assembles a complete NixOS system from the stereOS module tree, external flake modules, and mixtape-specific features.
+
+## Function Signature
+
+```nix
+mkMixtape :: {
+  name         :: string
+  features     :: list of module
+  system       :: string (default: "aarch64-linux")
+  extraModules :: list of module (default: [])
+} -> NixOS system configuration
+```
+
+## Parameters
+
+<ParamField path="name" type="string" required>
+  The hostname and identifier for the mixtape. Used for `networking.hostName` and shown in the ASCII art MOTD.
+  
+  Example: `"opencode-mixtape"`
+</ParamField>
+
+<ParamField path="features" type="list of module" default="[]">
+  Mixtape-specific feature modules. These are NixOS modules that configure the agent's environment, typically by adding to `stereos.agent.extraPackages`.
+  
+  Example: `[ ./mixtapes/opencode/base.nix ]`
+</ParamField>
+
+<ParamField path="system" type="string" default="aarch64-linux">
+  Target system architecture. Must be one of:
+  - `"aarch64-linux"` (ARM64 Linux, default)
+  - `"x86_64-linux"` (Intel/AMD Linux)
+  
+  Example: `"aarch64-linux"`
+</ParamField>
+
+<ParamField path="extraModules" type="list of module" default="[]">
+  Additional NixOS modules to include. Used for the dev profile or custom overrides.
+  
+  Example: `[ ./profiles/dev.nix ]`
+</ParamField>
+
+## Returns
+
+A NixOS system configuration (the result of `nixpkgs.lib.nixosSystem`).
+
+## Usage
+
+### Basic Mixtape
+
+```nix
+let
+  stereos-lib = import ./lib { inherit inputs; };
+in
+{
+  nixosConfigurations.opencode-mixtape = stereos-lib.mkMixtape {
+    name = "opencode-mixtape";
+    features = [ ./mixtapes/opencode/base.nix ];
+  };
+}
+```
+
+### Dev Build with SSH Key Injection
+
+```nix
+let
+  stereos-lib = import ./lib { inherit inputs; };
+in
+{
+  nixosConfigurations.opencode-mixtape-dev = stereos-lib.mkMixtape {
+    name = "opencode-mixtape";
+    features = [ ./mixtapes/opencode/base.nix ];
+    extraModules = [ ./profiles/dev.nix ];  # Injects SSH key
+  };
+}
+```
+
+### Multi-Agent Mixtape
+
+```nix
+let
+  stereos-lib = import ./lib { inherit inputs; };
+in
+{
+  nixosConfigurations.full-mixtape = stereos-lib.mkMixtape {
+    name = "full-mixtape";
+    features = [ ./mixtapes/full/base.nix ];  # Includes multiple agents
+  };
+}
+```
+
+### Custom System Architecture
+
+```nix
+let
+  stereos-lib = import ./lib { inherit inputs; };
+in
+{
+  nixosConfigurations.opencode-x86 = stereos-lib.mkMixtape {
+    name = "opencode-mixtape";
+    system = "x86_64-linux";
+    features = [ ./mixtapes/opencode/base.nix ];
+  };
+}
+```
+
+## What mkMixtape Includes
+
+The function automatically includes:
+
+1. **External flake modules** - `agentd` and `stereosd` NixOS modules
+2. **Package overlays** - Makes `pkgs.agentd` and `pkgs.stereosd` available
+3. **stereOS module tree** - All modules from `modules/default.nix`
+4. **Base profile** - `profiles/base.nix` (imports all image formats)
+5. **Sandbox closure manifest** - Pre-computed Nix store closure via `mkSandboxManifest`
+6. **Hostname** - Sets `networking.hostName = name`
+7. **Feature modules** - Your mixtape-specific configuration
+8. **Extra modules** - Optional additional modules (e.g., dev profile)
+
+## Implementation
+
+From `lib/default.nix:65`:
+
+```nix
+mkMixtape = { name, features ? [], system ? "aarch64-linux", extraModules ? [] }:
+  inputs.nixpkgs.lib.nixosSystem {
+    inherit system;
+    modules = [
+      # External flake NixOS modules
+      inputs.agentd.nixosModules.default
+      inputs.stereosd.nixosModules.default
+
+      # Apply overlays
+      ({ ... }: {
+        nixpkgs.overlays = [
+          inputs.agentd.overlays.default
+          inputs.stereosd.overlays.default
+        ];
+      })
+
+      # stereOS module tree
+      ../modules
+
+      # Shared base profile
+      ../profiles/base.nix
+
+      # Pre-computed sandbox closure manifest
+      (mkSandboxManifest { })
+
+      # Mixtape identity
+      {
+        networking.hostName = name;
+      }
+    ] ++ features ++ extraModules;
+  };
+```
+
+## Example: OpenCode Mixtape Feature Module
+
+```nix mixtapes/opencode/base.nix
+{ config, lib, pkgs, ... }:
+
+{
+  # Add opencode to the agent's restricted PATH
+  stereos.agent.extraPackages = [ pkgs.opencode ];
+
+  # Also make it available system-wide (for admin use)
+  environment.systemPackages = [ pkgs.opencode ];
+
+  # Seed a default configuration file for the agent user
+  environment.etc."skel/.config/opencode/config.json".text = builtins.toJSON {
+    "$schema" = "https://opencode.ai/config.json";
+  };
+}
+```
+
+## Building a Mixtape
+
+Once defined in `flake.nix`, build the system:
+
+```bash
+# Build raw disk image
+nix build .#nixosConfigurations.opencode-mixtape.config.system.build.raw
+
+# Build QCOW2 image
+nix build .#nixosConfigurations.opencode-mixtape.config.system.build.qcow2
+
+# Build kernel artifacts (direct-kernel boot)
+nix build .#nixosConfigurations.opencode-mixtape.config.system.build.kernel-artifacts
+```
+
+Or use the flake-parts convenience outputs:
+
+```bash
+# Build via flake/images.nix perSystem outputs
+nix build .#opencode-mixtape
+nix build .#opencode-mixtape-qcow2
+nix build .#opencode-mixtape-kernel-artifacts
+```
+
+## Source Reference
+
+Function definition: `lib/default.nix:65`  
+Used in: `flake.nix:55` (production configs) and `flake.nix:76` (dev configs)

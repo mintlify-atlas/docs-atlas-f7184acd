@@ -1,0 +1,206 @@
+---
+title: "Boot Module"
+description: "Boot configuration and optimizations for sub-3-second boot"
+---
+
+The boot module (`modules/boot.nix`) implements aggressive boot-time optimizations targeting sub-3-second boot for the stereOS agent sandbox image. The module is organized into two phases matching the optimization SPEC.
+
+## Boot Loader Configuration
+
+stereOS uses GRUB with EFI support (required for aarch64):
+
+```nix
+boot.loader.grub = {
+  enable = true;
+  efiSupport = true;
+  efiInstallAsRemovable = true;  # /EFI/BOOT/BOOTAA64.EFI for QEMU UEFI
+  device = "nodev";              # No MBR install — EFI only
+};
+```
+
+## Serial Console
+
+Multiple console devices are configured for headless operation:
+
+```nix
+boot.kernelParams = lib.mkMerge [
+  (lib.mkBefore [ "quiet" "loglevel=0" ])
+  [ "console=tty0" "console=ttyAMA0,115200" "console=hvc0" ]
+];
+```
+
+- `ttyAMA0` - PL011 UART on QEMU's virt machine (aarch64 -serial)
+- `hvc0` - virtio console on Apple Virtualization.framework
+- `tty0` - virtual terminal (active when a display is attached)
+
+The last console (`hvc0`) becomes `/dev/console` for systemd.
+
+## Phase 1: High-Impact, Low-Effort Optimizations
+
+### Systemd-Based Initrd
+
+Replaces NixOS's sequential bash stage-1 with parallelized systemd initrd:
+
+```nix
+boot.initrd.systemd.enable = true;
+```
+
+**Expected savings:** 1-3 seconds
+
+### Minimal Kernel Modules
+
+Restricts initrd to only virtio modules needed for VMs:
+
+```nix
+boot.initrd.availableKernelModules = lib.mkForce [
+  "virtio_blk"
+  "virtio_pci"
+  "virtio_net"
+  "virtio_console"
+  "virtiofs"
+  
+  # vsock: host-guest control plane for stereosd
+  "vsock"
+  "vmw_vsock_virtio_transport"
+  "vmw_vsock_virtio_transport_common"
+  
+  "ext4"
+  "erofs"
+  "overlay"
+];
+```
+
+### Force-Load vsock Transport
+
+Ensures vsock is available before stereosd starts:
+
+```nix
+boot.kernelModules = [ "vmw_vsock_virtio_transport" ];
+```
+
+Without this, stereosd's `VsockTransportAvailable()` check may fail and fall back to TCP.
+
+### Systemd-Networkd
+
+Replaces scripted networking with systemd-networkd:
+
+```nix
+networking.useNetworkd = true;
+networking.useDHCP = false;
+
+systemd.network.networks."10-ethernet" = {
+  matchConfig.Type = "ether";
+  networkConfig = {
+    DHCP = "yes";
+    LinkLocalAddressing = "ipv4";
+  };
+};
+
+# Do not stall boot waiting for network
+systemd.services.systemd-networkd-wait-online.enable = lib.mkForce false;
+```
+
+### Disable Unnecessary Services
+
+Removes desktop-oriented and documentation services:
+
+```nix
+# Documentation
+documentation.enable = false;
+documentation.man.enable = false;
+documentation.nixos.enable = false;
+
+# Desktop services
+security.polkit.enable = false;
+services.udisks2.enable = false;
+xdg.portal.enable = false;
+
+# Misc
+programs.command-not-found.enable = false;
+nix.channel.enable = false;
+users.mutableUsers = false;
+```
+
+### Systemd Timeouts
+
+Tightens timeouts for ephemeral VM use-case:
+
+```nix
+systemd.settings.Manager = {
+  DefaultTimeoutStartSec = "10s";
+  DefaultTimeoutStopSec = "3s";
+  DefaultDeviceTimeoutSec = "3s";
+};
+```
+
+Default NixOS values are 90s, far too long for a VM that should boot in under 5s.
+
+## Phase 2: Medium Effort Optimizations
+
+### Disable Getty Services
+
+stereOS is headless with no interactive TTY login:
+
+```nix
+services.getty.autologinUser = lib.mkForce null;
+systemd.services."getty@".enable = lib.mkForce false;
+systemd.services."serial-getty@".enable = lib.mkForce false;
+systemd.services."autovt@".enable = lib.mkForce false;
+```
+
+### Volatile Journal
+
+Uses in-memory journal (no persistent logs across reboots):
+
+```nix
+services.journald.storage = "volatile";
+services.journald.extraConfig = ''
+  RuntimeMaxUse=32M
+'';
+```
+
+### Restrict NSS
+
+Limits name service lookups to files and DNS only:
+
+```nix
+system.nssDatabases.passwd = lib.mkForce [ "files" ];
+system.nssDatabases.group  = lib.mkForce [ "files" ];
+system.nssDatabases.hosts  = lib.mkForce [ "files" "dns" ];
+```
+
+Prevents LDAP/mDNS/systemd-resolved lookups that add latency to every `getpwuid` call.
+
+## Boot Complete Marker
+
+A systemd oneshot unit writes a timestamp when boot is complete:
+
+```nix
+systemd.services.stereos-ready = {
+  description = "stereOS boot complete marker";
+  wantedBy = [ "multi-user.target" ];
+  after = [ "stereosd.service" ];
+  serviceConfig = {
+    Type = "oneshot";
+    ExecStart = "${pkgs.bash}/bin/sh -c '${pkgs.coreutils}/bin/date > /run/stereos-ready'";
+  };
+};
+```
+
+Check `/run/stereos-ready` for the Unix timestamp and compare against `/proc/uptime` to measure total time-to-ready.
+
+## Verification
+
+Measure boot time:
+
+```bash
+# Inside the VM
+systemd-analyze
+
+# Or check the ready marker
+cat /run/stereos-ready
+```
+
+## Source Reference
+
+View the complete module source: `modules/boot.nix:1`

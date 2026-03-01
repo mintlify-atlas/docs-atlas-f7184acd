@@ -1,0 +1,357 @@
+---
+title: Mixtapes
+description: Understanding stereOS mixtapes - pre-configured agent environments
+---
+
+# Mixtapes
+
+A **mixtape** is a complete stereOS machine image that bundles a hardened Linux system with a specific AI agent and its dependencies. Each mixtape is a bootable disk image with a curated set of packages, configurations, and runtime environment.
+
+## What is a Mixtape?
+
+Think of mixtapes as "flavors" of stereOS - each one includes:
+
+- The stereOS base system (hardened NixOS)
+- System daemons (stereosd, agentd)
+- A specific AI agent tool (opencode, claude-code, etc.)
+- Runtime dependencies for that agent
+- Pre-computed Nix store closure for fast sandboxing
+
+Every mixtape is immutable, declarative, and reproducible thanks to Nix.
+
+## Available Mixtapes
+
+| Mixtape | Agent Binary | API Key Required | Description |
+|---------|-------------|------------------|-------------|
+| `opencode-mixtape` | `opencode` | `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` | OpenCode terminal AI coding agent |
+| `claude-code-mixtape` | `claude-code` | `ANTHROPIC_API_KEY` | Anthropic's Claude Code CLI |
+| `gemini-cli-mixtape` | `gemini-cli` | `GOOGLE_API_KEY` | Google Gemini CLI |
+| `full-mixtape` | All agents | Various | All agents combined |
+
+## Mixtape Variants
+
+Each mixtape comes in two variants:
+
+### Production Variant
+
+```bash
+nix build .#opencode-mixtape
+```
+
+- **No baked-in SSH keys** - keys injected at runtime by stereosd over vsock
+- **No development tools** beyond the base package set
+- **Immutable user database** (`users.mutableUsers = false`)
+- **Production-ready security posture**
+
+From `~/workspace/source/modules/base.nix:61-64`:
+```nix
+# stereOS images are built without baked-in SSH keys or passwords.
+# SSH authorized keys are ephemerally injected at VM boot time by stereosd
+# over vsock.
+users.allowNoPasswordLogin = true;
+```
+
+### Development Variant
+
+```bash
+nix build .#opencode-mixtape-dev
+```
+
+- **Local SSH keys injected** from `profiles/dev.nix`
+- **Additional debug tools** for development
+- **Same security model** as production (agent is still restricted)
+
+<Warning>
+Development variants should NEVER be deployed to production. They include SSH keys from your development machine.
+</Warning>
+
+## How Mixtapes Work
+
+### The mkMixtape Function
+
+Every mixtape is built using `lib/default.nix:mkMixtape`:
+
+From `~/workspace/source/lib/default.nix:59-96`:
+```nix
+mkMixtape = { name, features ? [], system ? "aarch64-linux", extraModules ? [] }:
+  inputs.nixpkgs.lib.nixosSystem {
+    inherit system;
+    modules = [
+      # External flake NixOS modules
+      inputs.agentd.nixosModules.default
+      inputs.stereosd.nixosModules.default
+
+      # Apply overlays
+      ({ ... }: {
+        nixpkgs.overlays = [
+          inputs.agentd.overlays.default
+          inputs.stereosd.overlays.default
+        ];
+      })
+
+      # stereOS module tree
+      ../modules
+
+      # Shared base profile
+      ../profiles/base.nix
+
+      # Pre-computed sandbox closure manifest
+      (mkSandboxManifest { })
+
+      # Mixtape identity
+      { networking.hostName = name; }
+    ] ++ features ++ extraModules;
+  };
+```
+
+### Example: OpenCode Mixtape
+
+From `~/workspace/source/mixtapes/opencode/base.nix`:
+```nix
+{ config, lib, pkgs, ... }:
+
+{
+  # Add opencode to the agent's restricted PATH
+  stereos.agent.extraPackages = [ pkgs.opencode ];
+
+  # Also make it available system-wide (for admin use)
+  environment.systemPackages = [ pkgs.opencode ];
+
+  # Seed a default configuration file
+  environment.etc."skel/.config/opencode/config.json".text = builtins.toJSON {
+    "$schema" = "https://opencode.ai/config.json";
+  };
+}
+```
+
+This simple module:
+
+1. Adds `opencode` to `stereos.agent.extraPackages`
+2. Makes it available system-wide for admin
+3. Seeds a default config file
+
+## Package Management
+
+### Agent Packages
+
+The agent user has access to two package sets:
+
+**Base Packages** (`stereos.agent.basePackages`):
+
+From `~/workspace/source/modules/users/agent.nix:72-109`:
+```nix
+default = with pkgs; [
+  # Core POSIX utilities
+  coreutils gnugrep gnused gawk findutils diffutils less which
+
+  # Development essentials
+  git curl jq ripgrep tree file unzip gnumake
+
+  # Editors
+  vim
+
+  # Terminal multiplexer
+  tmux
+
+  # Process inspection (safe subset)
+  htop procps  # ps, top, etc.
+
+  # Networking
+  openssh  # ssh client
+  cacert   # TLS certificates
+
+  # Shell
+  bash
+];
+```
+
+**Extra Packages** (`stereos.agent.extraPackages`):
+
+- Mixtape-specific tools (opencode, claude-code, etc.)
+- Custom packages defined in feature modules
+- Appended by each mixtape's configuration
+
+<Info>
+The agent's restricted shell combines both package sets into a single PATH, preventing access to Nix tooling while allowing all approved binaries.
+</Info>
+
+### Restricted Shell
+
+The agent user runs a restricted shell that:
+
+From `~/workspace/source/modules/users/agent.nix:34-53`:
+```nix
+agentShell = pkgs.writeShellScriptBin "stereos-agent-shell" ''
+  # Set PATH to only approved binaries + feature tool binaries
+  export PATH="${agentEnv}/bin:${extraEnv}/bin"
+
+  # Ensure TLS certificates work
+  export SSL_CERT_FILE="${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+  export NIX_SSL_CERT_FILE="$SSL_CERT_FILE"
+
+  # Nuke all Nix-related environment variables
+  unset NIX_PATH NIX_REMOTE NIX_CONF_DIR NIX_USER_CONF_FILES
+  unset NIX_PROFILES NIX_STORE
+
+  # Default working directory to ~/workspace
+  if [ -d "$HOME/workspace" ]; then
+    cd "$HOME/workspace"
+  fi
+
+  # Exec into a clean bash session
+  exec ${pkgs.bash}/bin/bash --login "$@"
+'';
+```
+
+## Sandbox Closure Manifest
+
+Each mixtape includes a pre-computed Nix store closure manifest for gVisor sandboxing:
+
+From `~/workspace/source/lib/default.nix:19-43`:
+```nix
+mkSandboxManifest = { }:
+  { config, lib, pkgs, ... }:
+  let
+    # Combine base + extra packages
+    allPackages = config.stereos.agent.basePackages
+      ++ config.stereos.agent.extraPackages;
+
+    # Build environment from all packages
+    sandboxProfile = pkgs.buildEnv {
+      name = "stereos-sandbox-profile";
+      paths = allPackages;
+      pathsToLink = [ "/bin" "/lib" "/share" "/etc" ];
+    };
+
+    # Compute full /nix/store closure at build time
+    closureManifest = pkgs.closureInfo { rootPaths = [ sandboxProfile ]; };
+  in
+  {
+    # Install manifest to well-known path for agentd
+    environment.etc."stereos/sandbox-closure.txt" = {
+      source = "${closureManifest}/store-paths";
+      mode = "0444";
+    };
+  };
+```
+
+This manifest at `/etc/stereos/sandbox-closure.txt` allows agentd to quickly bind-mount the exact Nix store paths needed for sandboxed agents without running `nix-store -qR` at runtime.
+
+## Creating Custom Mixtapes
+
+To create your own mixtape:
+
+### 1. Create a Feature Module
+
+```nix
+# mixtapes/my-agent/base.nix
+{ config, lib, pkgs, ... }:
+
+{
+  # Add your agent package
+  stereos.agent.extraPackages = [ pkgs.my-agent ];
+
+  # System-wide availability
+  environment.systemPackages = [ pkgs.my-agent ];
+
+  # Optional: seed configuration
+  systemd.tmpfiles.rules = [
+    "d /home/agent/.config/my-agent 0755 agent agent -"
+  ];
+}
+```
+
+### 2. Register in flake.nix
+
+```nix
+# In flake/images.nix
+my-agent-mixtape = lib.mkMixtape {
+  name = "my-agent-mixtape";
+  features = [ ../mixtapes/my-agent/base.nix ];
+};
+
+my-agent-mixtape-dev = lib.mkMixtape {
+  name = "my-agent-mixtape-dev";
+  features = [ ../mixtapes/my-agent/base.nix ];
+  extraModules = [ ../profiles/dev.nix ];
+};
+```
+
+### 3. Build Your Mixtape
+
+```bash
+nix build .#my-agent-mixtape
+```
+
+<Note>
+Custom packages must be available in nixpkgs or provided via an overlay. Consider vendoring your agent package if it's not in nixpkgs.
+</Note>
+
+## Mixtape Outputs
+
+Each mixtape build produces multiple artifacts:
+
+```bash
+result/
+├── stereos.img           # Raw EFI disk image
+├── stereos.img.zst       # Compressed raw image
+├── stereos.qcow2         # QCOW2 disk image
+├── stereos.qcow2.zst     # Compressed QCOW2
+├── bzImage               # Linux kernel
+├── initrd                # Initial ramdisk
+├── cmdline               # Kernel command line
+├── init                  # NixOS stage-2 init path
+└── mixtape.toml          # Manifest with checksums
+```
+
+From the README:
+> `lib/dist.nix:mkDist` assembles all formats into a publish-ready directory with zstd-compressed variants (`-19 -T0`) and a `mixtape.toml` manifest containing SHA-256 checksums and file sizes for every artifact.
+
+## Runtime Configuration
+
+Mixtapes are immutable at build time but accept runtime configuration via:
+
+### Environment Variables
+
+Injected by stereosd over the control plane:
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...
+GOOGLE_API_KEY=...
+```
+
+### Shared Directories
+
+Mounted by stereosd from the host:
+
+- `/home/agent/workspace` - default working directory
+- Custom mounts defined in jcard.toml `[[shared]]` entries
+
+### Secret Files
+
+Written by stereosd to `/run/stereos/secrets/` (tmpfs-backed):
+
+- Never persisted to disk
+- Readable only by root and the agent user
+- Ephemeral - cleared on shutdown
+
+<Warning>
+Secrets are stored in-memory only. They are never written to the disk image and are cleared when the VM shuts down.
+</Warning>
+
+## Mixtape Lifecycle
+
+1. **Build** - Nix evaluates the mixtape and produces disk images
+2. **Boot** - VM boots from the image, stereosd starts
+3. **Initialize** - stereosd injects secrets, mounts shared directories
+4. **Launch** - agentd starts the agent process
+5. **Shutdown** - stereosd coordinates graceful shutdown
+
+The entire lifecycle is coordinated by stereosd over virtio-vsock or TCP.
+
+## Next Steps
+
+- Understand the [System Architecture](/concepts/architecture)
+- Learn about the [Security Model](/concepts/security)
+- Explore [System Components](/concepts/system-components)
